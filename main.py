@@ -69,7 +69,7 @@ app.add_middleware(
 )
 
 # Mount static files
-app.mount("/static", StaticFiles(directory="static"), name="static")
+# app.mount("/static", StaticFiles(directory="static"), name="static")
 
 smtp_server = "smtp.gmail.com"
 smtp_port = 465
