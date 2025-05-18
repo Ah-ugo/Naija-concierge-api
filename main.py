@@ -611,6 +611,26 @@ class Transaction(TransactionInDB):
     id: str
 
 
+
+class BookingDataPoint(BaseModel):
+    name: str
+    bookings: int
+    completed: int
+
+class RevenueDataPoint(BaseModel):
+    name: str
+    revenue: float
+
+class ChartDataResponse(BaseModel):
+    bookingData: List[BookingDataPoint]
+    revenueData: List[RevenueDataPoint]
+
+
+class Timeframe(str, Enum):
+    weekly = "weekly"
+    monthly = "monthly"
+
+
 # Helper functions
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
@@ -4033,6 +4053,119 @@ async def get_admin_stats(current_user: UserInDB = Depends(get_admin_user)):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to get admin stats",
+        )
+
+
+
+
+@app.get("/analytics/chart-data", response_model=ChartDataResponse)
+async def get_chart_data(timeframe: Timeframe = Timeframe.weekly):
+    try:
+        if timeframe == Timeframe.weekly:
+            # Get data for the last 7 days
+            end_date = datetime.utcnow()
+            start_date = end_date - timedelta(days=7)
+
+            # Generate day names for the past 7 days
+            days = [(start_date + timedelta(days=i)).strftime("%a") for i in range(7)]
+
+            booking_data = []
+            revenue_data = []
+
+            for i, day in enumerate(days):
+                day_start = start_date + timedelta(days=i)
+                day_end = day_start + timedelta(days=1)
+
+                # Count bookings for the day
+                total_bookings = db.bookings.count_documents({
+                    "bookingDate": {"$gte": day_start, "$lt": day_end}
+                })
+
+                # Count completed bookings for the day
+                completed_bookings = db.bookings.count_documents({
+                    "bookingDate": {"$gte": day_start, "$lt": day_end},
+                    "status": "completed"
+                })
+
+                # Calculate revenue for the day
+                day_bookings = db.bookings.find({
+                    "bookingDate": {"$gte": day_start, "$lt": day_end},
+                    "status": {"$in": ["confirmed", "completed"]}
+                })
+
+                day_revenue = 0
+                for booking in day_bookings:
+                    service = db.services.find_one({"_id": ObjectId(booking["serviceId"])})
+                    if service:
+                        day_revenue += service["price"]
+
+                booking_data.append({
+                    "name": day,
+                    "bookings": total_bookings,
+                    "completed": completed_bookings
+                })
+
+                revenue_data.append({
+                    "name": day,
+                    "revenue": day_revenue
+                })
+
+        else:  # Monthly timeframe
+            # Get data for the last 4 weeks
+            end_date = datetime.utcnow()
+            start_date = end_date - timedelta(weeks=4)
+
+            booking_data = []
+            revenue_data = []
+
+            for week in range(4):
+                week_start = start_date + timedelta(weeks=week)
+                week_end = week_start + timedelta(weeks=1)
+
+                # Count bookings for the week
+                total_bookings = db.bookings.count_documents({
+                    "bookingDate": {"$gte": week_start, "$lt": week_end}
+                })
+
+                # Count completed bookings for the week
+                completed_bookings = db.bookings.count_documents({
+                    "bookingDate": {"$gte": week_start, "$lt": week_end},
+                    "status": "completed"
+                })
+
+                # Calculate revenue for the week
+                week_bookings = db.bookings.find({
+                    "bookingDate": {"$gte": week_start, "$lt": week_end},
+                    "status": {"$in": ["confirmed", "completed"]}
+                })
+
+                week_revenue = 0
+                for booking in week_bookings:
+                    service = db.services.find_one({"_id": ObjectId(booking["serviceId"])})
+                    if service:
+                        week_revenue += service["price"]
+
+                booking_data.append({
+                    "name": f"Week {week + 1}",
+                    "bookings": total_bookings,
+                    "completed": completed_bookings
+                })
+
+                revenue_data.append({
+                    "name": f"Week {week + 1}",
+                    "revenue": week_revenue
+                })
+
+        return {
+            "bookingData": booking_data,
+            "revenueData": revenue_data
+        }
+
+    except Exception as e:
+        logger.error(f"Error fetching chart data: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch chart data"
         )
 
 
