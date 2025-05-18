@@ -22,6 +22,10 @@ from email.mime.multipart import MIMEMultipart
 import logging
 from fastapi.encoders import jsonable_encoder
 import uuid
+import requests
+from enum import Enum
+import httpx
+from pymongo.collection import Collection
 
 # Configure logging
 logging.basicConfig(
@@ -34,6 +38,26 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 
+required_env_vars = [
+    "MONGO_URI",
+    "CLOUDINARY_CLOUD_NAME",
+    "CLOUDINARY_API_KEY",
+    "CLOUDINARY_API_SECRET",
+    "SECRET_KEY",
+    "SMTP_HOST",
+    "SMTP_PORT",
+    "SMTP_USERNAME",
+    "SMTP_PASSWORD",
+    "GMAIL_ADDRESS",
+    "AIRTABLE_API_KEY",
+    "AIRTABLE_BASE_ID",
+    "AIRTABLE_TABLE_NAME"
+]
+for var in required_env_vars:
+    if not os.getenv(var):
+        logger.error(f"Missing required environment variable: {var}")
+        raise ValueError(f"Missing required environment variable: {var}")
+
 # MongoDB connection
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 client = MongoClient(MONGO_URI)
@@ -45,6 +69,18 @@ cloudinary.config(
     api_key=os.getenv("CLOUDINARY_API_KEY"),
     api_secret=os.getenv("CLOUDINARY_API_SECRET")
 )
+
+AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
+AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
+AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME")
+
+
+FLUTTERWAVE_SECRET_KEY = os.getenv("FLUTTERWAVE_SECRET_KEY")
+FLUTTERWAVE_BASE_URL = "https://api.flutterwave.com/v3"
+FLUTTERWAVE_SECRET_HASH = os.getenv("FLUTTERWAVE_SECRET_HASH")
+EXCHANGE_RATE_API_KEY = os.getenv("EXCHANGE_RATE_API_KEY")
+EXCHANGE_RATE_BASE_URL = "https://v6.exchangerate-api.com/v6"
+
 
 # JWT configuration
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key")
@@ -98,27 +134,26 @@ except Exception as e:
     print(f"Error sending email: {e}")
 
 
-# Pydantic models
-# class PyObjectId(ObjectId):
-#     @classmethod
-#     def __get_validators__(cls):
-#         yield cls.validate
-#
-#     @classmethod
-#     def validate(cls, v, handler):
-#         if not ObjectId.is_valid(v):
-#             raise ValueError("Invalid ObjectId")
-#         return ObjectId(v)
-#
-#     @classmethod
-#     def __get_pydantic_core_schema__(
-#         cls,
-#         source: type[Any],
-#         handler: GetJsonSchemaHandler,
-#     ) -> core_schema.CoreSchema:
-#         return core_schema.str_schema()
+class PyObjectId(ObjectId):
+    @classmethod
+    def __get_validators__(cls):
+        yield cls.validate
 
-PyObjectId = Annotated[str, BeforeValidator(str)]
+    @classmethod
+    def validate(cls, v, handler):
+        if not ObjectId.is_valid(v):
+            raise ValueError("Invalid ObjectId")
+        return ObjectId(v)
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls,
+        source: type[Any],
+        handler: GetJsonSchemaHandler,
+    ) -> core_schema.CoreSchema:
+        return core_schema.str_schema()
+
+# PyObjectId = Annotated[str, BeforeValidator(str)]
 
 class UserBase(BaseModel):
     email: EmailStr
@@ -211,7 +246,7 @@ class ServiceUpdate(BaseModel):
 
 
 class ServiceInDB(ServiceBase):
-    id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
+    id: Optional[PyObjectId] = Field(alias="_id", default=None)
     createdAt: datetime = Field(default_factory=datetime.utcnow)
     updatedAt: datetime = Field(default_factory=datetime.utcnow)
 
@@ -228,7 +263,70 @@ class Service(ServiceBase):
 
     class Config:
         orm_mode = True
+        arbitrary_types_allowed = True
 
+
+class CRMClientBase(BaseModel):
+    clientName: str
+    contactInfo: Dict[str, str]
+    serviceBooked: str
+    status: str = "pending"
+    assignedVendor: Optional[str] = None
+    notes: Optional[str] = None
+    dueDate: Optional[datetime] = None
+
+class CRMClientCreate(CRMClientBase):
+    pass
+
+class CRMClientUpdate(BaseModel):
+    clientName: Optional[str] = None
+    contactInfo: Optional[Dict[str, str]] = None
+    serviceBooked: Optional[str] = None
+    status: Optional[str] = None
+    assignedVendor: Optional[str] = None
+    notes: Optional[str] = None
+    dueDate: Optional[datetime] = None
+
+
+class CRMClientInDB(CRMClientBase):
+    id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
+    createdAt: datetime = Field(default_factory=datetime.utcnow)
+    updatedAt: datetime = Field(default_factory=datetime.utcnow)
+
+    class Config:
+        allow_population_by_field_name = True
+        arbitrary_types_allowed = True
+        json_encoders = {ObjectId: str}
+
+class CRMClient(CRMClientBase):
+    id: str
+    createdAt: datetime
+    updatedAt: datetime
+
+    class Config:
+        orm_mode = True
+
+class AirtableBookingForm(BaseModel):
+    clientName: str
+    email: EmailStr
+    phone: Optional[str] = None
+    serviceId: str
+    bookingDate: datetime
+    specialRequests: Optional[str] = None
+
+
+# class Package(BaseModel):
+#     id: str
+#     name: str
+#     description: str
+#     price: float  # Price in NGN
+#     duration: int
+#     features: List[str]
+#     image: Optional[str]
+#     type: str
+#     isPopular: bool
+#     createdAt: datetime
+#     updatedAt: datetime
 
 class PackageBase(BaseModel):
     name: str
@@ -295,12 +393,12 @@ class BookingUpdate(BaseModel):
 
 
 class BookingInDB(BookingBase):
-    id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
+    id: PyObjectId = Field(default_factory=ObjectId, alias="_id")
     createdAt: datetime = Field(default_factory=datetime.utcnow)
     updatedAt: datetime = Field(default_factory=datetime.utcnow)
 
     class Config:
-        allow_population_by_field_name = True
+        # allow_population_by_field_name = True
         arbitrary_types_allowed = True
         json_encoders = {ObjectId: str}
 
@@ -312,7 +410,22 @@ class Booking(BookingBase):
     service: Optional[Service] = None
 
     class Config:
-        orm_mode = True
+        arbitrary_types_allowed = True
+        json_encoders = {ObjectId: str}
+
+
+class SubscriptionStatus(str, Enum):
+    active = "active"
+    inactive = "inactive"
+    cancelled = "cancelled"
+
+
+class SubscriptionInitiate(BaseModel):
+    userId: str
+    packageId: str
+    preferredCurrency: Optional[str] = "NGN"
+
+
 
 
 class SubscriptionBase(BaseModel):
@@ -330,7 +443,7 @@ class SubscriptionCreate(SubscriptionBase):
 class SubscriptionUpdate(BaseModel):
     startDate: Optional[datetime] = None
     endDate: Optional[datetime] = None
-    status: Optional[str] = None
+    status: Optional[SubscriptionStatus]
 
 
 class SubscriptionInDB(SubscriptionBase):
@@ -472,6 +585,32 @@ class Document(DocumentBase):
         orm_mode = True
 
 
+# class TransactionCreate(BaseModel):
+#     subscriptionId: str
+#     amount: float
+#     currency: str
+#     transactionId: str
+#     status: str
+
+class TransactionCreate(BaseModel):
+    tx_ref: str
+    transactionId: str
+    userId: str
+    packageId: str
+    amount: float  # Amount in NGN
+    currency: str  # Base currency (NGN)
+    preferredCurrency: str  # User's preferred currency
+    status: str
+
+
+class TransactionInDB(TransactionCreate):
+    createdAt: datetime
+    updatedAt: datetime
+
+class Transaction(TransactionInDB):
+    id: str
+
+
 # Helper functions
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
@@ -489,14 +628,29 @@ def get_user(email: str):
     return None
 
 
+# def get_user_by_id(user_id: str):
+#     try:
+#         user = db.users.find_one({"_id": ObjectId(user_id)})
+#         if user:
+#             return UserInDB(**user)
+#     except Exception as e:
+#         logger.error(f"Error getting user by ID: {e}")
+#     return None
+
 def get_user_by_id(user_id: str):
     try:
         user = db.users.find_one({"_id": ObjectId(user_id)})
-        if user:
-            return UserInDB(**user)
+        if not user:
+            logger.error(f"User not found for ID: {user_id}")
+            return None
+        user["_id"] = str(user["_id"])  # Convert ObjectId to string
+        return UserInDB(**user)
+    except ValidationError as ve:
+        logger.error(f"Validation error for user ID {user_id}: {ve}")
+        return None
     except Exception as e:
-        logger.error(f"Error getting user by ID: {e}")
-    return None
+        logger.error(f"Error getting user by ID {user_id}: {e}", exc_info=True)
+        return None
 
 
 def authenticate_user(email: str, password: str):
@@ -586,6 +740,51 @@ def send_email(to_email: str, subject: str, html_content: str):
             except Exception as e:
                 logger.error(f"Error closing SMTP connection: {e}")
 
+
+def send_admin_notification(subject: str, message: str):
+    """
+    Send an email notification to all admin users.
+
+    Args:
+        subject (str): Email subject
+        message (str): Email body (plain text or HTML)
+        db (Collection): MongoDB users collection
+
+    Raises:
+        HTTPException: If no admins are found or email sending fails
+    """
+    try:
+        # Find all admin users
+        admin_users = db.users.find({"role": "admin"})
+        admin_emails = [user["email"] for user in admin_users]
+
+        if not admin_emails:
+            logger.warning("No admin users found for notification")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No admin users found to notify"
+            )
+
+        # Send email to each admin
+        for email in admin_emails:
+            try:
+                send_email(email, subject, message)
+                logger.info(f"Notification sent to admin: {email}")
+            except Exception as e:
+                logger.error(f"Failed to send notification to {email}: {e}")
+                continue  # Continue with next admin if one fails
+
+        logger.info(f"Notifications sent to {len(admin_emails)} admins")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error sending admin notifications: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to send admin notifications"
+        )
+
 def upload_file_to_cloudinary(file: UploadFile, folder: str = "naija_concierge"):
     """Upload file to Cloudinary and return the URL"""
     try:
@@ -617,6 +816,201 @@ def serialize_object_id(obj):
                     if isinstance(item, dict):
                         serialize_object_id(item)
     return obj
+
+
+def add_to_airtable(booking_data: Dict) -> Dict:
+    try:
+        headers = {
+            "Authorization": f"Bearer {os.getenv('AIRTABLE_API_KEY')}",
+            "Content-Type": "application/json"
+        }
+        url = f"https://api.airtable.com/v0/{os.getenv('AIRTABLE_BASE_ID')}/{os.getenv('AIRTABLE_TABLE_NAME')}"
+
+        # Ensure all values are JSON-serializable
+        serialized_data = {
+            "records": [{
+                "fields": {
+                    key: str(value) if isinstance(value, (ObjectId, datetime)) else value
+                    for key, value in booking_data.items()
+                }
+            }]
+        }
+        logger.info(f"Sending to Airtable: {serialized_data}")
+
+        response = requests.post(url, headers=headers, json=serialized_data)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.HTTPError as e:
+        error_detail = e.response.json() if e.response.content else str(e)
+        logger.error(f"Airtable HTTP error: {e}, Response: {error_detail}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Airtable API error: {error_detail}"
+        )
+    except Exception as e:
+        logger.error(f"Error adding to Airtable: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to add to Airtable: {str(e)}"
+        )
+
+async def get_exchange_rate(from_currency: str, to_currency: str) -> float:
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(
+                f"{EXCHANGE_RATE_BASE_URL}/{EXCHANGE_RATE_API_KEY}/latest/{from_currency}"
+            )
+            response.raise_for_status()
+            rates = response.json().get("conversion_rates", {})
+            return rates.get(to_currency, 1.0)
+        except Exception as e:
+            logger.error(f"Error fetching exchange rate: {e}")
+            raise HTTPException(status_code=500, detail="Failed to fetch exchange rate")
+
+
+async def initialize_flutterwave_payment(
+        email: str,
+        amount: float,
+        currency: str,
+        tx_ref: str,
+        country: str
+):
+    url = "https://api.flutterwave.com/v3/payments"
+    headers = {
+        "Authorization": f"Bearer {os.getenv('FLUTTERWAVE_SECRET_KEY')}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "tx_ref": tx_ref,
+        "amount": amount,
+        "currency": currency,
+        "redirect_url": os.getenv("FLUTTERWAVE_REDIRECT_URL", "https://yourapp.com/redirect"),
+        "customer": {
+            "email": email
+        },
+        "customizations": {
+            "title": "Subscription Payment",
+            "description": "Payment for subscription package"
+        }
+    }
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(url, json=payload, headers=headers)
+        response.raise_for_status()  # Raise an error for non-200 responses
+        return response.json()
+
+async def verify_flutterwave_payment(transaction_id: str) -> dict:
+    async with httpx.AsyncClient() as client:
+        try:
+            headers = {"Authorization": f"Bearer {FLUTTERWAVE_SECRET_KEY}"}
+            response = await client.get(
+                f"{FLUTTERWAVE_BASE_URL}/transactions/{transaction_id}/verify",
+                headers=headers
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"Error verifying Flutterwave payment: {e}")
+            raise HTTPException(status_code=500, detail="Failed to verify payment")
+
+def verify_webhook_signature(payload: bytes, signature: str) -> bool:
+    computed_hash = hmac.new(
+        FLUTTERWAVE_SECRET_HASH.encode(),
+        payload,
+        hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(computed_hash, signature)
+
+async def create_subscription_from_transaction(transaction: dict):
+    try:
+        package = db.packages.find_one({"_id": ObjectId(transaction["packageId"])})
+        if not package:
+            logger.error(f"Package not found: {transaction['packageId']}")
+            return None
+
+        active_subscription = db.subscriptions.find_one({
+            "userId": transaction["userId"],
+            "status": "active"
+        })
+        if active_subscription:
+            logger.error(f"User {transaction['userId']} already has an active subscription")
+            return None
+
+        subscription_in_db = SubscriptionInDB(
+            userId=transaction["userId"],
+            packageId=transaction["packageId"],
+            startDate=datetime.utcnow(),
+            endDate=datetime.utcnow() + timedelta(days=package["duration"]),
+            status=SubscriptionStatus.active,
+            createdAt=datetime.utcnow(),
+            updatedAt=datetime.utcnow()
+        )
+        result = db.subscriptions.insert_one(subscription_in_db.dict(by_alias=True))
+        created_subscription = db.subscriptions.find_one({"_id": result.inserted_id})
+
+        package_obj = Package(
+            id=str(package["_id"]),
+            name=package["name"],
+            description=package["description"],
+            price=package["price"],
+            duration=package["duration"],
+            features=package["features"],
+            image=package.get("image"),
+            type=package["type"],
+            isPopular=package["isPopular"],
+            createdAt=package["createdAt"],
+            updatedAt=package["updatedAt"]
+        )
+
+        user = get_user_by_id(transaction["userId"])
+        if user:
+            subscription_html = f"""
+            <html>
+                <body>
+                    <h1>Subscription Confirmation</h1>
+                    <p>Dear {user["firstName"]},</p>
+                    <p>Your subscription to the {package["name"]} package has been successfully created.</p>
+                    <p>Subscription Details:</p>
+                    <ul>
+                        <li>Package: {package["name"]}</li>
+                        <li>Start Date: {created_subscription["startDate"].strftime("%Y-%m-%d")}</li>
+                        <li>End Date: {created_subscription["endDate"].strftime("%Y-%m-%d")}</li>
+                        <li>Price: {transaction["preferredCurrency"]} (equivalent to NGN {transaction["amount"]})</li>
+                        <li>Status: {created_subscription["status"]}</li>
+                    </ul>
+                    <p>Thank you for choosing Naija Concierge. If you have any questions, please contact us.</p>
+                    <p>Best regards,<br>The Naija Concierge Team</p>
+                </body>
+            </html>
+            """
+            send_email(user["email"], "Subscription Confirmation - Naija Concierge", subscription_html)
+
+        notification_message = f"""
+        New subscription created:
+        - Client: {user["firstName"]} {user["lastName"]}
+        - Package: {package["name"]}
+        - Start Date: {created_subscription["startDate"].strftime("%Y-%m-%d")}
+        - Status: {created_subscription["status"]}
+        - Amount Paid: {transaction["preferredCurrency"]} (equivalent to NGN {transaction["amount"]})
+        """
+        send_admin_notification("New Subscription Created", notification_message)
+
+        return Subscription(
+            id=str(created_subscription["_id"]),
+            userId=created_subscription["userId"],
+            packageId=created_subscription["packageId"],
+            startDate=created_subscription["startDate"],
+            endDate=created_subscription["endDate"],
+            status=created_subscription["status"],
+            createdAt=created_subscription["createdAt"],
+            updatedAt=created_subscription["updatedAt"],
+            package=package_obj
+        )
+    except Exception as e:
+        logger.error(f"Error creating subscription from transaction: {e}")
+        return None
+
+
 
 
 # Routes
@@ -850,21 +1244,62 @@ async def update_user(
     )
 
 
+@app.delete("/users/{user_id}")
+async def delete_user(
+        user_id: str,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    try:
+        user = db.users.find_one({"_id": ObjectId(user_id)})
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found",
+            )
+
+        bookings = db.bookings.find_one({"userId": user_id})
+        if bookings:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot delete user with existing bookings",
+            )
+
+        subscriptions = db.subscriptions.find_one({"userId": user_id})
+        if subscriptions:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot delete user with existing subscriptions",
+            )
+
+        result = db.users.delete_one({"_id": ObjectId(user_id)})
+        if result.deleted_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="User deletion failed",
+            )
+
+        return {"message": "User deleted successfully"}
+    except Exception as e:
+        logger.error(f"Error deleting user: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User deletion failed",
+        )
+
+
 @app.post("/users/profile-image")
 async def upload_profile_image(
         file: UploadFile = File(...),
         current_user: UserInDB = Depends(get_current_user)
 ):
-    # if not file.content_type.startswith("image/"):
-    #     raise HTTPException(
-    #         status_code=status.HTTP_400_BAD_REQUEST,
-    #         detail="File must be an image"
-    #     )
-    print(current_user)
-    # Upload to Cloudinary
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File must be an image"
+        )
+
     image_url = upload_file_to_cloudinary(file, folder="naija_concierge/profiles")
 
-    # Update user profile
     result = db.users.update_one(
         {"_id": ObjectId(current_user.id)},
         {"$set": {"profileImage": image_url, "updatedAt": datetime.utcnow()}}
@@ -879,6 +1314,529 @@ async def upload_profile_image(
     return {"profileImage": image_url}
 
 
+# crm
+
+@app.get("/crm/clients", response_model=List[CRMClient])
+async def get_crm_clients(
+        skip: int = 0,
+        limit: int = 100,
+        status: Optional[str] = None,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    query = {}
+    if status:
+        query["status"] = status
+
+    clients = list(db.crm_clients.find(query).skip(skip).limit(limit))
+    return [
+        CRMClient(
+            id=str(client["_id"]),
+            clientName=client["clientName"],
+            contactInfo=client["contactInfo"],
+            serviceBooked=client["serviceBooked"],
+            status=client["status"],
+            assignedVendor=client.get("assignedVendor"),
+            notes=client.get("notes"),
+            dueDate=client.get("dueDate"),
+            createdAt=client["createdAt"],
+            updatedAt=client["updatedAt"]
+        ) for client in clients
+    ]
+
+
+@app.post("/crm/clients", response_model=CRMClient)
+async def create_crm_client(
+        client: CRMClientCreate,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    if not client.clientName.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Client name is required"
+        )
+    if not client.contactInfo.get("email") and not client.contactInfo.get("phone"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="At least one contact method (email or phone) is required"
+        )
+
+    try:
+        service = db.services.find_one({"_id": ObjectId(client.serviceBooked)})
+        if not service:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Service not found"
+            )
+    except Exception as e:
+        logger.error(f"Invalid service ID: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid service ID"
+        )
+
+    client_in_db = CRMClientInDB(**client.dict())
+    result = db.crm_clients.insert_one(client_in_db.dict(by_alias=True))
+
+    created_client = db.crm_clients.find_one({"_id": result.inserted_id})
+
+    return CRMClient(
+        id=str(created_client["_id"]),
+        clientName=created_client["clientName"],
+        contactInfo=created_client["contactInfo"],
+        serviceBooked=created_client["serviceBooked"],
+        status=created_client["status"],
+        assignedVendor=created_client.get("assignedVendor"),
+        notes=created_client.get("notes"),
+        dueDate=created_client.get("dueDate"),
+        createdAt=created_client["createdAt"],
+        updatedAt=created_client["updatedAt"]
+    )
+
+
+@app.get("/crm/clients/{client_id}", response_model=CRMClient)
+async def get_crm_client(
+        client_id: str,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    try:
+        client = db.crm_clients.find_one({"_id": ObjectId(client_id)})
+        if not client:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Client not found",
+            )
+
+        return CRMClient(
+            id=str(client["_id"]),
+            clientName=client["clientName"],
+            contactInfo=client["contactInfo"],
+            serviceBooked=client["serviceBooked"],
+            status=client["status"],
+            assignedVendor=client.get("assignedVendor"),
+            notes=client.get("notes"),
+            dueDate=client.get("dueDate"),
+            createdAt=client["createdAt"],
+            updatedAt=client["updatedAt"]
+        )
+    except Exception as e:
+        logger.error(f"Error getting CRM client: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Client not found",
+        )
+
+@app.put("/crm/clients/{client_id}", response_model=CRMClient)
+async def update_crm_client(
+        client_id: str,
+        client_update: CRMClientUpdate,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    try:
+        client = db.crm_clients.find_one({"_id": ObjectId(client_id)})
+        if not client:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Client not found",
+            )
+
+        update_data = client_update.dict(exclude_unset=True)
+        if update_data:
+            if "clientName" in update_data and not update_data["clientName"].strip():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Client name cannot be empty"
+                )
+            if "serviceBooked" in update_data:
+                service = db.services.find_one({"_id": ObjectId(update_data["serviceBooked"])})
+                if not service:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Service not found"
+                    )
+            if "contactInfo" in update_data and not (update_data["contactInfo"].get("email") or update_data["contactInfo"].get("phone")):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="At least one contact method (email or phone) is required"
+                )
+            update_data["updatedAt"] = datetime.utcnow()
+            result = db.crm_clients.update_one(
+                {"_id": ObjectId(client_id)},
+                {"$set": update_data}
+            )
+
+            if result.modified_count == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Client update failed",
+                )
+
+
+        updated_client = db.crm_clients.find_one({"_id": ObjectId(client_id)})
+
+        return CRMClient(
+            id=str(updated_client["_id"]),
+            clientName=updated_client["clientName"],
+            contactInfo=updated_client["contactInfo"],
+            serviceBooked=updated_client["serviceBooked"],
+            status=updated_client["status"],
+            assignedVendor=updated_client.get("assignedVendor"),
+            notes=updated_client.get("notes"),
+            dueDate=updated_client.get("dueDate"),
+            createdAt=updated_client["createdAt"],
+            updatedAt=updated_client["updatedAt"]
+        )
+    except Exception as e:
+            logger.error(f"Error updating CRM client: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Client update failed",
+            )
+
+@app.delete("/crm/clients/{client_id}")
+async def delete_crm_client(
+        client_id: str,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    try:
+        client = db.crm_clients.find_one({"_id": ObjectId(client_id)})
+        if not client:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Client not found",
+            )
+
+        result = db.crm_clients.delete_one({"_id": ObjectId(client_id)})
+
+        if result.deleted_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Client deletion failed",
+            )
+
+        return {"message": "Client deleted successfully"}
+    except Exception as e:
+        logger.error(f"Error deleting CRM client: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Client deletion failed",
+        )
+
+
+# Airtable
+# @app.post("/bookings/airtable", response_model=Booking)
+# async def create_airtable_booking(
+#         booking_form: AirtableBookingForm
+# ):
+#     try:
+#         if not booking_form.clientName.strip():
+#             raise HTTPException(
+#                 status_code=status.HTTP_400_BAD_REQUEST,
+#                 detail="Client name is required"
+#             )
+#
+#         service = db.services.find_one({"_id": ObjectId(booking_form.serviceId)})
+#         if not service:
+#             raise HTTPException(
+#                 status_code=status.HTTP_404_NOT_FOUND,
+#                 detail="Service not found",
+#             )
+#
+#         if not service["isAvailable"]:
+#             raise HTTPException(
+#                 status_code=status.HTTP_400_BAD_REQUEST,
+#                 detail="Service is not available",
+#             )
+#
+#         user = db.users.find_one({"email": booking_form.email})
+#         if not user:
+#             user_dict = {
+#                 "email": booking_form.email,
+#                 "firstName": booking_form.clientName.split(" ")[0],
+#                 "lastName": " ".join(booking_form.clientName.split(" ")[1:]) if len(booking_form.clientName.split(" ")) > 1 else "",
+#                 "phone": booking_form.phone,
+#                 "role": "user",
+#                 "createdAt": datetime.utcnow(),
+#                 "updatedAt": datetime.utcnow(),
+#                 "hashed_password": get_password_hash(str(uuid.uuid4()))
+#             }
+#             user_result = db.users.insert_one(user_dict)
+#             user_id = str(user_result.inserted_id)
+#         else:
+#             user_id = str(user["_id"])
+#
+#         booking_data = BookingInDB(
+#             userId=user_id,
+#             serviceId=booking_form.serviceId,
+#             bookingDate=booking_form.bookingDate,
+#             status="pending",
+#             specialRequests=booking_form.specialRequests
+#         )
+#         result = db.bookings.insert_one(booking_data.dict(by_alias=True))
+#
+#         created_booking = db.bookings.find_one({"_id": result.inserted_id})
+#
+#         airtable_data = {
+#             "Client Name": booking_form.clientName,
+#             "Email": booking_form.email,
+#             "Phone": booking_form.phone or "",
+#             "Service": service["name"],
+#             "Booking Date": booking_form.bookingDate.isoformat(),
+#             "Special Requests": booking_form.specialRequests or "",
+#             "Status": "Pending",
+#             "Booking ID": str(created_booking["_id"])
+#         }
+#         add_to_airtable(airtable_data)
+#
+#         crm_client = CRMClientInDB(
+#             clientName=booking_form.clientName,
+#             contactInfo={"email": booking_form.email, "phone": booking_form.phone or ""},
+#             serviceBooked=booking_form.serviceId,
+#             status="pending"
+#         )
+#         db.crm_clients.insert_one(crm_client.dict(by_alias=True))
+#
+#         notification_message = f"""
+#         New booking received:
+#         - Client: {booking_form.clientName}
+#         - Service: {service["name"]}
+#         - Date: {booking_form.bookingDate.strftime("%Y-%m-%d %H:%M")}
+#         - Email: {booking_form.email}
+#         """
+#         send_admin_notification("New Booking Received", notification_message)
+#
+#         confirmation_html = f"""
+#         <html>
+#             <body>
+#                 <h1>Booking Confirmation</h1>
+#                 <p>Dear {booking_form.clientName},</p>
+#                 <p>Your booking for {service["name"]} has been received and is currently pending.</p>
+#                 <p>Booking Details:</p>
+#                 <ul>
+#                     <li>Service: {service["name"]}</li>
+#                     <li>Date: {booking_form.bookingDate.strftime("%Y-%m-%d %H:%M")}</li>
+#                     <li>Status: Pending</li>
+#                     <li>Price: ₦{service["price"]}</li>
+#                 </ul>
+#                 <p>We will contact you shortly to confirm your booking.</p>
+#                 <p>Best regards,<br>The Naija Concierge Team</p>
+#             </body>
+#         </html>
+#         """
+#         send_email(booking_form.email, "Booking Confirmation - Naija Concierge", confirmation_html)
+#
+#         service_obj = Service(
+#             id=str(service["_id"]),
+#             name=service["name"],
+#             description=service["description"],
+#             category=service["category"],
+#             price=service["price"],
+#             image=service.get("image"),
+#             duration=service["duration"],
+#             isAvailable=service["isAvailable"],
+#             createdAt=service["createdAt"],
+#             updatedAt=service["updatedAt"]
+#         )
+#
+#         return Booking(
+#             id=str(created_booking["_id"]),
+#             userId=created_booking["userId"],
+#             serviceId=created_booking["serviceId"],
+#             bookingDate=created_booking["bookingDate"],
+#             status=created_booking["status"],
+#             specialRequests=created_booking.get("specialRequests"),
+#             createdAt=created_booking["createdAt"],
+#             updatedAt=created_booking["updatedAt"],
+#             service=service_obj
+#         )
+#     except Exception as e:
+#         logger.error(f"Error creating Airtable booking: {e}")
+#         raise HTTPException(
+#             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+#             detail="Failed to create booking"
+#         )
+
+
+@app.post("/bookings/airtable", response_model=Booking)
+async def create_airtable_booking(
+    booking_form: AirtableBookingForm,
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    print(current_user)
+    try:
+        # Validate client name (not just "string" or empty)
+        if not booking_form.clientName.strip() or booking_form.clientName.lower() == "string":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Client name must be a valid name, not 'string' or empty"
+            )
+
+        # Validate phone (basic format check)
+        # if booking_form.phone and not re.match(r"^\+?\d{10,15}$", booking_form.phone):
+        #     raise HTTPException(
+        #         status_code=status.HTTP_400_BAD_REQUEST,
+        #         detail="Phone number must be a valid number (10-15 digits, optional leading +)"
+        #     )
+
+        # Validate service
+        service = db.services.find_one({"_id": ObjectId(booking_form.serviceId)})
+        if not service:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Service not found"
+            )
+
+        if not service["isAvailable"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Service is not available"
+            )
+
+        # Validate service price
+        # if not isinstance(service.get("price"), (int, float)) or service["price"] <= 0:
+        #     raise HTTPException(
+        #         status_code=status.HTTP_400_BAD_REQUEST,
+        #         detail="Service price must be a positive number"
+        #     )
+        #
+        # # Validate service name
+        # if not service["name"] or service["name"].lower() == "string":
+        #     raise HTTPException(
+        #         status_code=status.HTTP_400_BAD_REQUEST,
+        #         detail="Service name is invalid"
+        #     )
+
+        # Use current user's email
+        booking_email = current_user.email
+
+        # Check if user exists, create if not
+        user = db.users.find_one({"email": booking_email})
+        if not user:
+            user_dict = {
+                "email": booking_email,
+                "firstName": booking_form.clientName.split(" ")[0],
+                "lastName": " ".join(booking_form.clientName.split(" ")[1:]) if len(booking_form.clientName.split(" ")) > 1 else "",
+                "phone": booking_form.phone,
+                "role": "user",
+                "createdAt": datetime.utcnow(),
+                "updatedAt": datetime.utcnow(),
+                "hashed_password": get_password_hash(str(uuid.uuid4()))
+            }
+            user_result = db.users.insert_one(user_dict)
+            user_id = str(user_result.inserted_id)
+        else:
+            user_id = str(user["_id"])
+
+        # Create booking in MongoDB
+        booking_data = BookingInDB(
+            userId=user_id,
+            serviceId=booking_form.serviceId,
+            bookingDate=booking_form.bookingDate,
+            status="pending",
+            specialRequests=booking_form.specialRequests
+        )
+        result = db.bookings.insert_one(booking_data.dict(by_alias=True))
+        created_booking = db.bookings.find_one({"_id": result.inserted_id})
+
+        # Prepare Airtable data (aligned with Airtable schema)
+        airtable_data = {
+            "Booking ID": str(created_booking["_id"]),  # Explicitly convert ObjectId to string
+            "Client Name": booking_form.clientName,
+            "Service Requested": service["name"],
+            "Booking Date": booking_form.bookingDate.strftime("%Y-%m-%d"),
+            "Booking Details": booking_form.specialRequests or "",
+            "Status": "Pending",
+            "Total Cost": float(service["price"]),  # Ensure number type
+            "Feedback": [],  # Optional linked field
+            "Subscription Plan": [],  # Optional linked field
+            "User": []  # Optional linked field
+        }
+        logger.info(f"Airtable data prepared: {airtable_data}")
+
+        # Add to Airtable
+        airtable_response = add_to_airtable(airtable_data)
+        logger.info(f"Airtable response: {airtable_response}")
+
+        # Create CRM client entry
+        crm_client = CRMClientInDB(
+            clientName=booking_form.clientName,
+            contactInfo={"email": booking_email, "phone": booking_form.phone or ""},
+            serviceBooked=booking_form.serviceId,
+            status="pending"
+        )
+        db.crm_clients.insert_one(crm_client.dict(by_alias=True))
+
+        # Get user for notification
+        user_obj = get_user_by_id(user_id)
+        if not user_obj:
+            logger.error(f"User not found after creation: {user_id}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="User creation failed"
+            )
+
+        # Send admin notification
+        notification_message = f"""
+        New booking received:
+        - Client: {booking_form.clientName}
+        - Service: {service["name"]}
+        - Date: {booking_form.bookingDate.strftime("%Y-%m-%d %H:%M")}
+        - Email: {booking_email}
+        """
+        send_admin_notification("New Booking Received", notification_message)
+
+        # Send confirmation email to user
+        confirmation_html = f"""
+        <html>
+            <body>
+                <h1>Booking Confirmation</h1>
+                <p>Dear {booking_form.clientName},</p>
+                <p>Your booking for {service["name"]} has been received and is currently pending.</p>
+                <p>Booking Details:</p>
+                <ul>
+                    <li>Service: {service["name"]}</li>
+                    <li>Date: {booking_form.bookingDate.strftime("%Y-%m-%d %H:%M")}</li>
+                    <li>Status: Pending</li>
+                    <li>Price: ₦{service["price"]}</li>
+                </ul>
+                <p>We will contact you shortly to confirm your booking.</p>
+                <p>Best regards,<br>The Naija Concierge Team</p>
+            </body>
+        </html>
+        """
+        send_email(booking_email, "Booking Confirmation - Naija Concierge", confirmation_html)
+
+        # Create service object for response
+        service_obj = Service(
+            id=str(service["_id"]),
+            name=service["name"],
+            description=service["description"],
+            category=service["category"],
+            price=service["price"],
+            image=service.get("image"),
+            duration=service["duration"],
+            isAvailable=service["isAvailable"],
+            createdAt=service["createdAt"],
+            updatedAt=service["updatedAt"]
+        )
+
+        # Return booking response
+        return Booking(
+            id=str(created_booking["_id"]),
+            userId=created_booking["userId"],
+            serviceId=created_booking["serviceId"],
+            bookingDate=created_booking["bookingDate"],
+            status=created_booking["status"],
+            specialRequests=created_booking.get("specialRequests"),
+            createdAt=created_booking["createdAt"],
+            updatedAt=created_booking["updatedAt"],
+            service=service_obj
+        )
+    except Exception as e:
+        logger.error(f"Error creating Airtable booking: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create booking: {str(e)}"
+        )
 # Service routes
 @app.get("/services", response_model=List[Service])
 async def get_services(
@@ -937,13 +1895,52 @@ async def get_service(service_id: str):
         )
 
 
+# @app.post("/services", response_model=Service)
+# async def create_service(
+#         service: ServiceCreate,
+#         current_user: UserInDB = Depends(get_admin_user)
+# ):
+#     if not service.name.strip() or not service.description.strip() or not service.category.strip() or not service.duration.strip():
+#         raise HTTPException(
+#             status_code=status.HTTP_400_BAD_REQUEST,
+#             detail="Name, description, category, and duration are required"
+#         )
+#
+#     service_in_db = ServiceInDB(**service.dict())
+#     result = db.services.insert_one(service_in_db.dict(by_alias=True))
+#
+#     created_service = db.services.find_one({"_id": result.inserted_id})
+#
+#     return Service(
+#         id=str(created_service["_id"]),
+#         name=created_service["name"],
+#         description=created_service["description"],
+#         category=created_service["category"],
+#         price=created_service["price"],
+#         image=created_service.get("image"),
+#         duration=created_service["duration"],
+#         isAvailable=created_service["isAvailable"],
+#         createdAt=created_service["createdAt"],
+#         updatedAt=created_service["updatedAt"]
+#     )
+
+
 @app.post("/services", response_model=Service)
 async def create_service(
         service: ServiceCreate,
         current_user: UserInDB = Depends(get_admin_user)
 ):
+    if not service.name.strip() or not service.description.strip() or not service.category.strip() or not service.duration.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Name, description, category, and duration are required"
+        )
+
     service_in_db = ServiceInDB(**service.dict())
-    result = db.services.insert_one(service_in_db.dict(by_alias=True))
+    service_dict = service_in_db.dict(by_alias=True)
+    if service_dict["_id"] is None:
+        del service_dict["_id"]  # Remove _id if it's None to let MongoDB generate it
+    result = db.services.insert_one(service_dict)
 
     created_service = db.services.find_one({"_id": result.inserted_id})
 
@@ -960,7 +1957,6 @@ async def create_service(
         updatedAt=created_service["updatedAt"]
     )
 
-
 @app.put("/services/{service_id}", response_model=Service)
 async def update_service(
         service_id: str,
@@ -968,7 +1964,6 @@ async def update_service(
         current_user: UserInDB = Depends(get_admin_user)
 ):
     try:
-        # Check if service exists
         service = db.services.find_one({"_id": ObjectId(service_id)})
         if not service:
             raise HTTPException(
@@ -976,9 +1971,29 @@ async def update_service(
                 detail="Service not found",
             )
 
-        # Update service
         update_data = service_update.dict(exclude_unset=True)
         if update_data:
+            if "name" in update_data and not update_data["name"].strip():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Name cannot be empty"
+                )
+            if "description" in update_data and not update_data["description"].strip():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Description cannot be empty"
+                )
+            if "category" in update_data and not update_data["category"].strip():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Category cannot be empty"
+                )
+            if "duration" in update_data and not update_data["duration"].strip():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Duration cannot be empty"
+                )
+
             update_data["updatedAt"] = datetime.utcnow()
             result = db.services.update_one(
                 {"_id": ObjectId(service_id)},
@@ -991,7 +2006,6 @@ async def update_service(
                     detail="Service update failed",
                 )
 
-        # Get updated service
         updated_service = db.services.find_one({"_id": ObjectId(service_id)})
 
         return Service(
@@ -1014,13 +2028,13 @@ async def update_service(
         )
 
 
+
 @app.delete("/services/{service_id}")
 async def delete_service(
         service_id: str,
         current_user: UserInDB = Depends(get_admin_user)
 ):
     try:
-        # Check if service exists
         service = db.services.find_one({"_id": ObjectId(service_id)})
         if not service:
             raise HTTPException(
@@ -1028,7 +2042,6 @@ async def delete_service(
                 detail="Service not found",
             )
 
-        # Check if service has bookings
         bookings = db.bookings.find_one({"serviceId": service_id})
         if bookings:
             raise HTTPException(
@@ -1036,7 +2049,6 @@ async def delete_service(
                 detail="Cannot delete service with existing bookings",
             )
 
-        # Delete service
         result = db.services.delete_one({"_id": ObjectId(service_id)})
 
         if result.deleted_count == 0:
@@ -1136,6 +2148,17 @@ async def create_package(
         package: PackageCreate,
         current_user: UserInDB = Depends(get_admin_user)
 ):
+    if not package.name.strip() or not package.description.strip() or not package.type.strip() or not package.duration.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Name, description, type, and duration are required"
+        )
+    if not package.features:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="At least one feature is required"
+        )
+
     package_in_db = PackageInDB(**package.dict())
     result = db.packages.insert_one(package_in_db.dict(by_alias=True))
 
@@ -1155,7 +2178,6 @@ async def create_package(
         updatedAt=created_package["updatedAt"]
     )
 
-
 @app.put("/packages/{package_id}", response_model=Package)
 async def update_package(
         package_id: str,
@@ -1163,7 +2185,6 @@ async def update_package(
         current_user: UserInDB = Depends(get_admin_user)
 ):
     try:
-        # Check if package exists
         package = db.packages.find_one({"_id": ObjectId(package_id)})
         if not package:
             raise HTTPException(
@@ -1171,9 +2192,34 @@ async def update_package(
                 detail="Package not found",
             )
 
-        # Update package
         update_data = package_update.dict(exclude_unset=True)
         if update_data:
+            if "name" in update_data and not update_data["name"].strip():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Name cannot be empty"
+                )
+            if "description" in update_data and not update_data["description"].strip():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Description cannot be empty"
+                )
+            if "type" in update_data and not update_data["type"].strip():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Type cannot be empty"
+                )
+            if "duration" in update_data and not update_data["duration"].strip():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Duration cannot be empty"
+                )
+            if "features" in update_data and not update_data["features"]:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="At least one feature is required"
+                )
+
             update_data["updatedAt"] = datetime.utcnow()
             result = db.packages.update_one(
                 {"_id": ObjectId(package_id)},
@@ -1186,7 +2232,6 @@ async def update_package(
                     detail="Package update failed",
                 )
 
-        # Get updated package
         updated_package = db.packages.find_one({"_id": ObjectId(package_id)})
 
         return Package(
@@ -1216,7 +2261,6 @@ async def delete_package(
         current_user: UserInDB = Depends(get_admin_user)
 ):
     try:
-        # Check if package exists
         package = db.packages.find_one({"_id": ObjectId(package_id)})
         if not package:
             raise HTTPException(
@@ -1224,7 +2268,6 @@ async def delete_package(
                 detail="Package not found",
             )
 
-        # Check if package has subscriptions
         subscriptions = db.subscriptions.find_one({"packageId": package_id})
         if subscriptions:
             raise HTTPException(
@@ -1232,7 +2275,6 @@ async def delete_package(
                 detail="Cannot delete package with existing subscriptions",
             )
 
-        # Delete package
         result = db.packages.delete_one({"_id": ObjectId(package_id)})
 
         if result.deleted_count == 0:
@@ -1248,7 +2290,6 @@ async def delete_package(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Package deletion failed",
         )
-
 
 @app.post("/packages/image")
 async def upload_package_image(
@@ -1276,11 +2317,8 @@ async def get_bookings(
         current_user: UserInDB = Depends(get_current_active_user)
 ):
     query = {}
-
-    # Regular users can only see their own bookings
     if current_user.role != "admin":
         query["userId"] = str(current_user.id)
-
     if status:
         query["status"] = status
 
@@ -1384,14 +2422,12 @@ async def create_booking(
         booking: BookingCreate,
         current_user: UserInDB = Depends(get_current_active_user)
 ):
-    # Regular users can only create bookings for themselves
     if current_user.role != "admin" and booking.userId != str(current_user.id):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not enough permissions",
         )
 
-    # Check if service exists
     try:
         service = db.services.find_one({"_id": ObjectId(booking.serviceId)})
         if not service:
@@ -1400,7 +2436,6 @@ async def create_booking(
                 detail="Service not found",
             )
 
-        # Check if service is available
         if not service["isAvailable"]:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -1409,8 +2444,8 @@ async def create_booking(
     except Exception as e:
         logger.error(f"Error checking service: {e}")
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Service not found",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid service ID",
         )
 
     booking_in_db = BookingInDB(**booking.dict())
@@ -1431,7 +2466,6 @@ async def create_booking(
         updatedAt=service["updatedAt"]
     )
 
-    # Send booking confirmation email
     user = get_user_by_id(booking.userId)
     if user:
         booking_html = f"""
@@ -1454,6 +2488,15 @@ async def create_booking(
         """
         send_email(user.email, "Booking Confirmation - Naija Concierge", booking_html)
 
+    notification_message = f"""
+    New booking created:
+    - Client: {user.firstName} {user.lastName}
+    - Service: {service["name"]}
+    - Date: {created_booking["bookingDate"].strftime("%Y-%m-%d %H:%M")}
+    - Status: {created_booking["status"]}
+    """
+    send_admin_notification("New Booking Created", notification_message)
+
     return Booking(
         id=str(created_booking["_id"]),
         userId=created_booking["userId"],
@@ -1474,7 +2517,6 @@ async def update_booking(
         current_user: UserInDB = Depends(get_current_active_user)
 ):
     try:
-        # Check if booking exists
         booking = db.bookings.find_one({"_id": ObjectId(booking_id)})
         if not booking:
             raise HTTPException(
@@ -1482,17 +2524,14 @@ async def update_booking(
                 detail="Booking not found",
             )
 
-        # Regular users can only update their own bookings
         if current_user.role != "admin" and booking["userId"] != str(current_user.id):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Not enough permissions",
             )
 
-        # Regular users can only update certain fields
         update_data = booking_update.dict(exclude_unset=True)
         if current_user.role != "admin" and "status" in update_data:
-            # Regular users can only cancel their bookings
             if update_data["status"] != "cancelled":
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
@@ -1512,7 +2551,6 @@ async def update_booking(
                     detail="Booking update failed",
                 )
 
-        # Get updated booking
         updated_booking = db.bookings.find_one({"_id": ObjectId(booking_id)})
 
         service = db.services.find_one({"_id": ObjectId(updated_booking["serviceId"])})
@@ -1531,7 +2569,6 @@ async def update_booking(
                 updatedAt=service["updatedAt"]
             )
 
-        # Send booking update email if status changed
         if "status" in update_data:
             user = get_user_by_id(updated_booking["userId"])
             if user:
@@ -1554,6 +2591,15 @@ async def update_booking(
                 """
                 send_email(user.email, "Booking Status Update - Naija Concierge", status_update_html)
 
+            notification_message = f"""
+            Booking status updated:
+            - Client: {user.firstName} {user.lastName}
+            - Service: {service["name"]}
+            - Date: {updated_booking["bookingDate"].strftime("%Y-%m-%d %H:%M")}
+            - New Status: {updated_booking["status"]}
+            """
+            send_admin_notification("Booking Status Updated", notification_message)
+
         return Booking(
             id=str(updated_booking["_id"]),
             userId=updated_booking["userId"],
@@ -1572,14 +2618,12 @@ async def update_booking(
             detail="Booking update failed",
         )
 
-
 @app.delete("/bookings/{booking_id}")
 async def delete_booking(
         booking_id: str,
         current_user: UserInDB = Depends(get_admin_user)
 ):
     try:
-        # Check if booking exists
         booking = db.bookings.find_one({"_id": ObjectId(booking_id)})
         if not booking:
             raise HTTPException(
@@ -1587,7 +2631,6 @@ async def delete_booking(
                 detail="Booking not found",
             )
 
-        # Delete booking
         result = db.bookings.delete_one({"_id": ObjectId(booking_id)})
 
         if result.deleted_count == 0:
@@ -1604,7 +2647,6 @@ async def delete_booking(
             detail="Booking deletion failed",
         )
 
-
 # Subscription routes
 @app.get("/subscriptions", response_model=List[Subscription])
 async def get_subscriptions(
@@ -1614,11 +2656,8 @@ async def get_subscriptions(
         current_user: UserInDB = Depends(get_current_active_user)
 ):
     query = {}
-
-    # Regular users can only see their own subscriptions
     if current_user.role != "admin":
         query["userId"] = str(current_user.id)
-
     if status:
         query["status"] = status
 
@@ -1662,7 +2701,6 @@ async def get_subscriptions(
 
     return result
 
-
 @app.get("/subscriptions/{subscription_id}", response_model=Subscription)
 async def get_subscription(
         subscription_id: str,
@@ -1676,7 +2714,6 @@ async def get_subscription(
                 detail="Subscription not found",
             )
 
-        # Regular users can only see their own subscriptions
         if current_user.role != "admin" and subscription["userId"] != str(current_user.id):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -1719,19 +2756,117 @@ async def get_subscription(
         )
 
 
+# @app.post("/subscriptions", response_model=Subscription)
+# async def create_subscription(
+#         subscription: SubscriptionCreate,
+#         current_user: UserInDB = Depends(get_current_active_user)
+# ):
+#     if current_user.role != "admin" and subscription.userId != str(current_user.id):
+#         raise HTTPException(
+#             status_code=status.HTTP_403_FORBIDDEN,
+#             detail="Not enough permissions",
+#         )
+#
+#     try:
+#         package = db.packages.find_one({"_id": ObjectId(subscription.packageId)})
+#         if not package:
+#             raise HTTPException(
+#                 status_code=status.HTTP_404_NOT_FOUND,
+#                 detail="Package not found",
+#             )
+#     except Exception as e:
+#         logger.error(f"Error checking package: {e}")
+#         raise HTTPException(
+#             status_code=status.HTTP_400_BAD_REQUEST,
+#             detail="Invalid package ID",
+#         )
+#
+#     active_subscription = db.subscriptions.find_one({
+#         "userId": subscription.userId,
+#         "status": "active"
+#     })
+#     if active_subscription:
+#         raise HTTPException(
+#             status_code=status.HTTP_400_BAD_REQUEST,
+#             detail="User already has an active subscription",
+#         )
+#
+#     subscription_in_db = SubscriptionInDB(**subscription.dict())
+#     result = db.subscriptions.insert_one(subscription_in_db.dict(by_alias=True))
+#
+#     created_subscription = db.subscriptions.find_one({"_id": result.inserted_id})
+#
+#     package_obj = Package(
+#         id=str(package["_id"]),
+#         name=package["name"],
+#         description=package["description"],
+#         price=package["price"],
+#         duration=package["duration"],
+#         features=package["features"],
+#         image=package.get("image"),
+#         type=package["type"],
+#         isPopular=package["isPopular"],
+#         createdAt=package["createdAt"],
+#         updatedAt=package["updatedAt"]
+#     )
+#
+#     user = get_user_by_id(subscription.userId)
+#     if user:
+#         subscription_html = f"""
+#         <html>
+#             <body>
+#                 <h1>Subscription Confirmation</h1>
+#                 <p>Dear {user.firstName},</p>
+#                 <p>Your subscription to the {package["name"]} package has been successfully created.</p>
+#                 <p>Subscription Details:</p>
+#                 <ul>
+#                     <li>Package: {package["name"]}</li>
+#                     <li>Start Date: {created_subscription["startDate"].strftime("%Y-%m-%d")}</li>
+#                     <li>End Date: {created_subscription["endDate"].strftime("%Y-%m-%d")}</li>
+#                     <li>Price: ₦{package["price"]}</li>
+#                     <li>Status: {created_subscription["status"]}</li>
+#                 </ul>
+#                 <p>Thank you for choosing Naija Concierge. If you have any questions, please contact us.</p>
+#                 <p>Best regards,<br>The Naija Concierge Team</p>
+#             </body>
+#         </html>
+#         """
+#         send_email(user.email, "Subscription Confirmation - Naija Concierge", subscription_html)
+#
+#     notification_message = f"""
+#     New subscription created:
+#     - Client: {user.firstName} {user.lastName}
+#     - Package: {package["name"]}
+#     - Start Date: {created_subscription["startDate"].strftime("%Y-%m-%d")}
+#     - Status: {created_subscription["status"]}
+#     """
+#     send_admin_notification("New Subscription Created", notification_message)
+#
+#     return Subscription(
+#         id=str(created_subscription["_id"]),
+#         userId=created_subscription["userId"],
+#         packageId=created_subscription["packageId"],
+#         startDate=created_subscription["startDate"],
+#         endDate=created_subscription["endDate"],
+#         status=created_subscription["status"],
+#         createdAt=created_subscription["createdAt"],
+#         updatedAt=created_subscription["updatedAt"],
+#         package=package_obj
+#     )
+
+
+
 @app.post("/subscriptions", response_model=Subscription)
 async def create_subscription(
         subscription: SubscriptionCreate,
-        current_user: UserInDB = Depends(get_current_active_user)
+        current_user: dict = Depends(get_current_active_user)
 ):
-    # Regular users can only create subscriptions for themselves
-    if current_user.role != "admin" and subscription.userId != str(current_user.id):
+    if current_user["role"] != "admin" and subscription.userId != str(current_user["id"]):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not enough permissions",
         )
 
-    # Check if package exists
     try:
         package = db.packages.find_one({"_id": ObjectId(subscription.packageId)})
         if not package:
@@ -1742,11 +2877,10 @@ async def create_subscription(
     except Exception as e:
         logger.error(f"Error checking package: {e}")
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Package not found",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid package ID",
         )
 
-    # Check if user already has an active subscription
     active_subscription = db.subscriptions.find_one({
         "userId": subscription.userId,
         "status": "active"
@@ -1757,7 +2891,27 @@ async def create_subscription(
             detail="User already has an active subscription",
         )
 
-    subscription_in_db = SubscriptionInDB(**subscription.dict())
+    # Verify payment transaction
+    transaction = db.transactions.find_one({
+        "subscriptionId": f"pending_{subscription.userId}_{subscription.packageId}",
+        "status": "success"
+    })
+    if not transaction:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail="Payment required to create subscription",
+        )
+
+    # Create subscription
+    subscription_in_db = SubscriptionInDB(
+        userId=subscription.userId,
+        packageId=subscription.packageId,
+        startDate=datetime.utcnow(),
+        endDate=datetime.utcnow() + timedelta(days=package["duration"]),
+        status=SubscriptionStatus.active,
+        createdAt=datetime.utcnow(),
+        updatedAt=datetime.utcnow()
+    )
     result = db.subscriptions.insert_one(subscription_in_db.dict(by_alias=True))
 
     created_subscription = db.subscriptions.find_one({"_id": result.inserted_id})
@@ -1776,31 +2930,38 @@ async def create_subscription(
         updatedAt=package["updatedAt"]
     )
 
-    # Send subscription confirmation email
     user = get_user_by_id(subscription.userId)
     if user:
         subscription_html = f"""
         <html>
             <body>
                 <h1>Subscription Confirmation</h1>
-                <p>Dear {user.firstName},</p>
-                <p>Thank you for subscribing to our {package["name"]} package.</p>
+                <p>Dear {user["firstName"]},</p>
+                <p>Your subscription to the {package["name"]} package has been successfully created.</p>
                 <p>Subscription Details:</p>
                 <ul>
                     <li>Package: {package["name"]}</li>
                     <li>Start Date: {created_subscription["startDate"].strftime("%Y-%m-%d")}</li>
                     <li>End Date: {created_subscription["endDate"].strftime("%Y-%m-%d")}</li>
-                    <li>Price: ₦{package["price"]}</li>
+                    <li>Price: {transaction["currency"]} {transaction["amount"]}</li>
+                    <li>Status: {created_subscription["status"]}</li>
                 </ul>
-                <p>Included Services:</p>
-                <ul>
-                    {"".join([f"<li>{feature}</li>" for feature in package["features"]])}
-                </ul>
+                <p>Thank you for choosing Naija Concierge. If you have any questions, please contact us.</p>
                 <p>Best regards,<br>The Naija Concierge Team</p>
             </body>
         </html>
         """
-        send_email(user.email, "Subscription Confirmation - Naija Concierge", subscription_html)
+        send_email(user["email"], "Subscription Confirmation - Naija Concierge", subscription_html)
+
+    notification_message = f"""
+    New subscription created:
+    - Client: {user["firstName"]} {user["lastName"]}
+    - Package: {package["name"]}
+    - Start Date: {created_subscription["startDate"].strftime("%Y-%m-%d")}
+    - Status: {created_subscription["status"]}
+    - Amount Paid: {transaction["currency"]} {transaction["amount"]}
+    """
+    send_admin_notification("New Subscription Created", notification_message)
 
     return Subscription(
         id=str(created_subscription["_id"]),
@@ -1815,6 +2976,143 @@ async def create_subscription(
     )
 
 
+@app.post("/subscriptions/initiate_payment")
+async def initiate_subscription_payment(
+    subscription: SubscriptionInitiate,
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    if current_user.role != "admin" and subscription.userId != str(current_user.id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not enough permissions",
+        )
+
+    try:
+        package = db.packages.find_one({"_id": ObjectId(subscription.packageId)})
+        if not package:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Package not found",
+            )
+    except Exception as e:
+        logger.error(f"Error checking package: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid package ID",
+        )
+
+    # Initiate Flutterwave payment
+    tx_ref = f"sub_init_{subscription.userId}_{subscription.packageId}_{int(datetime.utcnow().timestamp())}"
+    payment_response = await initialize_flutterwave_payment(
+        email=current_user.email,
+        amount=package["price"],
+        currency="NGN",
+        tx_ref=tx_ref,
+        country="NG"
+    )
+
+    # Log the full response for debugging
+    logger.info(f"Flutterwave payment response: {payment_response}")
+
+    # Check if response has expected structure
+    if payment_response.get("status") != "success" or "data" not in payment_response:
+        logger.error(f"Unexpected Flutterwave response: {payment_response}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to initiate payment with Flutterwave",
+        )
+
+    # Extract transaction ID and payment link
+    data = payment_response["data"]
+    transaction_id = data.get("tx_ref") or data.get("transaction_id") or tx_ref  # Fallback to tx_ref if no ID
+    payment_link = data.get("link")
+
+    if not payment_link:
+        logger.error(f"No payment link in Flutterwave response: {payment_response}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Payment link not provided by Flutterwave",
+        )
+
+    # Store pending transaction
+    transaction = TransactionInDB(
+        tx_ref=tx_ref,
+        transactionId=transaction_id,  # Use the extracted transaction ID
+        userId=subscription.userId,
+        packageId=subscription.packageId,
+        amount=package["price"],
+        currency="NGN",
+        preferredCurrency=subscription.preferredCurrency,
+        status="pending",
+        createdAt=datetime.utcnow(),
+        updatedAt=datetime.utcnow()
+    )
+    db.transactions.insert_one(transaction.dict(by_alias=True))
+
+    return {"payment_url": payment_link}
+
+@app.post("/webhooks/flutterwave")
+async def handle_flutterwave_webhook(
+        payload: dict,
+        request: Request
+):
+    signature = request.headers.get("verif-hash")
+    if not signature or not verify_webhook_signature(await request.body(), signature):
+        raise HTTPException(status_code=401, detail="Invalid webhook signature")
+
+    event = payload.get("event")
+    data = payload.get("data")
+
+    if event == "charge.completed" and data["status"] == "successful":
+        transaction_id = str(data["id"])
+        tx_ref = data["tx_ref"]
+        transaction = db.transactions.find_one({"tx_ref": tx_ref, "transactionId": transaction_id})
+        if not transaction:
+            logger.error(f"Transaction not found for tx_ref: {tx_ref}, ID: {transaction_id}")
+            return {"status": "error"}
+
+        # Verify payment
+        verification = await verify_flutterwave_payment(transaction_id)
+        if verification["status"] == "success" and verification["data"]["status"] == "successful":
+            # Update transaction status
+            db.transactions.update_one(
+                {"tx_ref": tx_ref},
+                {"$set": {"status": "success", "updatedAt": datetime.utcnow()}}
+            )
+            logger.info(f"Payment verified for tx_ref: {tx_ref}")
+
+            # Create subscription
+            subscription = await create_subscription_from_transaction(transaction)
+            if subscription:
+                logger.info(f"Subscription created for tx_ref: {tx_ref}")
+            else:
+                logger.error(f"Failed to create subscription for tx_ref: {tx_ref}")
+        else:
+            logger.error(f"Payment verification failed for tx_ref: {tx_ref}")
+            db.transactions.update_one(
+                {"tx_ref": tx_ref},
+                {"$set": {"status": "failed", "updatedAt": datetime.utcnow()}}
+            )
+
+    return {"status": "success"}
+
+@app.get("/payment/callback")
+async def payment_callback(
+        status: str,
+        tx_ref: Optional[str] = None,
+        transaction_id: Optional[str] = None
+):
+    if status == "successful" and tx_ref:
+        transaction = db.transactions.find_one({"tx_ref": tx_ref})
+        if transaction and transaction["status"] == "success":
+            return {"message": "Payment successful. Subscription created."}
+        return {"message": "Payment received. Awaiting confirmation."}
+    elif status == "cancelled":
+        return {"message": "Payment cancelled. Please try again."}
+    else:
+        return {"message": "Payment failed. Please contact support."}
+
+
 @app.put("/subscriptions/{subscription_id}", response_model=Subscription)
 async def update_subscription(
         subscription_id: str,
@@ -1822,7 +3120,6 @@ async def update_subscription(
         current_user: UserInDB = Depends(get_current_active_user)
 ):
     try:
-        # Check if subscription exists
         subscription = db.subscriptions.find_one({"_id": ObjectId(subscription_id)})
         if not subscription:
             raise HTTPException(
@@ -1830,23 +3127,13 @@ async def update_subscription(
                 detail="Subscription not found",
             )
 
-        # Regular users can only update their own subscriptions
         if current_user.role != "admin" and subscription["userId"] != str(current_user.id):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Not enough permissions",
             )
 
-        # Regular users can only update certain fields
         update_data = subscription_update.dict(exclude_unset=True)
-        if current_user.role != "admin" and "status" in update_data:
-            # Regular users can only cancel their subscriptions
-            if update_data["status"] != "cancelled":
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Not enough permissions to change status",
-                )
-
         if update_data:
             update_data["updatedAt"] = datetime.utcnow()
             result = db.subscriptions.update_one(
@@ -1860,7 +3147,6 @@ async def update_subscription(
                     detail="Subscription update failed",
                 )
 
-        # Get updated subscription
         updated_subscription = db.subscriptions.find_one({"_id": ObjectId(subscription_id)})
 
         package = db.packages.find_one({"_id": ObjectId(updated_subscription["packageId"])})
@@ -1880,7 +3166,6 @@ async def update_subscription(
                 updatedAt=package["updatedAt"]
             )
 
-        # Send subscription update email if status changed
         if "status" in update_data:
             user = get_user_by_id(updated_subscription["userId"])
             if user:
@@ -1904,6 +3189,14 @@ async def update_subscription(
                 """
                 send_email(user.email, "Subscription Status Update - Naija Concierge", status_update_html)
 
+            notification_message = f"""
+            Subscription status updated:
+            - Client: {user.firstName} {user.lastName}
+            - Package: {package["name"]}
+            - New Status: {updated_subscription["status"]}
+            """
+            send_admin_notification("Subscription Status Updated", notification_message)
+
         return Subscription(
             id=str(updated_subscription["_id"]),
             userId=updated_subscription["userId"],
@@ -1922,14 +3215,12 @@ async def update_subscription(
             detail="Subscription update failed",
         )
 
-
 @app.delete("/subscriptions/{subscription_id}")
 async def delete_subscription(
         subscription_id: str,
         current_user: UserInDB = Depends(get_admin_user)
 ):
     try:
-        # Check if subscription exists
         subscription = db.subscriptions.find_one({"_id": ObjectId(subscription_id)})
         if not subscription:
             raise HTTPException(
@@ -1937,7 +3228,6 @@ async def delete_subscription(
                 detail="Subscription not found",
             )
 
-        # Delete subscription
         result = db.subscriptions.delete_one({"_id": ObjectId(subscription_id)})
 
         if result.deleted_count == 0:
@@ -1945,6 +3235,22 @@ async def delete_subscription(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Subscription deletion failed",
             )
+
+        package = db.packages.find_one({"_id": ObjectId(subscription["packageId"])})
+        user = get_user_by_id(subscription["userId"])
+        if user and package:
+            cancellation_html = f"""
+            <html>
+                <body>
+                    <h1>Subscription Cancelled</h1>
+                    <p>Dear {user.firstName},</p>
+                    <p>Your subscription to the {package["name"]} package has been cancelled.</p>
+                    <p>If you have any questions or would like to reactivate, please contact us.</p>
+                    <p>Best regards,<br>The Naija Concierge Team</p>
+                </body>
+            </html>
+            """
+            send_email(user.email, "Subscription Cancellation - Naija Concierge", cancellation_html)
 
         return {"message": "Subscription deleted successfully"}
     except Exception as e:
@@ -1955,7 +3261,11 @@ async def delete_subscription(
         )
 
 
+
+
+
 # Blog routes
+
 @app.get("/blogs", response_model=List[Blog])
 async def get_blogs(
         skip: int = 0,
@@ -1964,7 +3274,7 @@ async def get_blogs(
 ):
     query = {}
     if tag:
-        query["tags"] = tag
+        query["tags"] = {"$in": [tag]}
 
     blogs = list(db.blogs.find(query).skip(skip).limit(limit))
     return [
@@ -1983,7 +3293,36 @@ async def get_blogs(
     ]
 
 
-@app.get("/blogs/{slug}", response_model=Blog)
+@app.get("/blogs/{blog_id}", response_model=Blog)
+async def get_blog(blog_id: str):
+    try:
+        blog = db.blogs.find_one({"_id": ObjectId(blog_id)})
+        if not blog:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Blog not found",
+            )
+
+        return Blog(
+            id=str(blog["_id"]),
+            title=blog["title"],
+            slug=blog["slug"],
+            content=blog["content"],
+            excerpt=blog["excerpt"],
+            coverImage=blog.get("coverImage"),
+            author=blog["author"],
+            tags=blog["tags"],
+            createdAt=blog["createdAt"],
+            updatedAt=blog["updatedAt"]
+        )
+    except Exception as e:
+        logger.error(f"Error getting blog: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Blog not found",
+        )
+
+@app.get("/blogs/blog/{slug}", response_model=Blog)
 async def get_blog_by_slug(slug: str):
     blog = db.blogs.find_one({"slug": slug})
     if not blog:
@@ -2011,12 +3350,22 @@ async def create_blog(
         blog: BlogCreate,
         current_user: UserInDB = Depends(get_admin_user)
 ):
-    # Check if slug already exists
+    if not blog.title.strip() or not blog.slug.strip() or not blog.content.strip() or not blog.excerpt.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Title, slug, content, and excerpt are required"
+        )
+    if not blog.author.get("name"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Author name is required"
+        )
+
     existing_blog = db.blogs.find_one({"slug": blog.slug})
     if existing_blog:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Slug already exists",
+            detail="Blog with this slug already exists",
         )
 
     blog_in_db = BlogInDB(**blog.dict())
@@ -2038,6 +3387,7 @@ async def create_blog(
     )
 
 
+
 @app.put("/blogs/{blog_id}", response_model=Blog)
 async def update_blog(
         blog_id: str,
@@ -2045,7 +3395,6 @@ async def update_blog(
         current_user: UserInDB = Depends(get_admin_user)
 ):
     try:
-        # Check if blog exists
         blog = db.blogs.find_one({"_id": ObjectId(blog_id)})
         if not blog:
             raise HTTPException(
@@ -2053,18 +3402,41 @@ async def update_blog(
                 detail="Blog not found",
             )
 
-        # Check if slug already exists (if updating slug)
-        if blog_update.slug and blog_update.slug != blog["slug"]:
-            existing_blog = db.blogs.find_one({"slug": blog_update.slug})
-            if existing_blog:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Slug already exists",
-                )
-
-        # Update blog
         update_data = blog_update.dict(exclude_unset=True)
         if update_data:
+            if "title" in update_data and not update_data["title"].strip():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Title cannot be empty"
+                )
+            if "slug" in update_data:
+                if not update_data["slug"].strip():
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Slug cannot be empty"
+                    )
+                existing_blog = db.blogs.find_one({"slug": update_data["slug"], "_id": {"$ne": ObjectId(blog_id)}})
+                if existing_blog:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Blog with this slug already exists",
+                    )
+            if "content" in update_data and not update_data["content"].strip():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Content cannot be empty"
+                )
+            if "excerpt" in update_data and not update_data["excerpt"].strip():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Excerpt cannot be empty"
+                )
+            if "author" in update_data and not update_data["author"].get("name"):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Author name is required"
+                )
+
             update_data["updatedAt"] = datetime.utcnow()
             result = db.blogs.update_one(
                 {"_id": ObjectId(blog_id)},
@@ -2077,7 +3449,6 @@ async def update_blog(
                     detail="Blog update failed",
                 )
 
-        # Get updated blog
         updated_blog = db.blogs.find_one({"_id": ObjectId(blog_id)})
 
         return Blog(
@@ -2098,7 +3469,6 @@ async def update_blog(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Blog update failed",
         )
-
 
 @app.delete("/blogs/{blog_id}")
 async def delete_blog(
@@ -2185,8 +3555,13 @@ async def create_emergency_alert(
         alert: EmergencyAlertCreate,
         current_user: UserInDB = Depends(get_current_active_user)
 ):
-    # Regular users can only create alerts for themselves
-    if current_user.role != "admin" and alert.userId != str(current_user.id):
+    if not alert.message.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Message is required"
+        )
+
+    if alert.userId != str(current_user.id) and current_user.role != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not enough permissions",
@@ -2197,23 +3572,29 @@ async def create_emergency_alert(
 
     created_alert = db.emergency_alerts.find_one({"_id": result.inserted_id})
 
-    # Send emergency notification to admin
-    admin_users = list(db.users.find({"role": "admin"}))
-    for admin in admin_users:
-        emergency_html = f"""
+    user = get_user_by_id(alert.userId)
+    if user:
+        alert_html = f"""
         <html>
             <body>
-                <h1 style="color: red;">EMERGENCY ALERT</h1>
-                <p>An emergency alert has been submitted by a user.</p>
-                <p><strong>User ID:</strong> {alert.userId}</p>
-                <p><strong>Message:</strong> {alert.message}</p>
-                <p><strong>Location:</strong> {alert.location or "Not provided"}</p>
-                <p><strong>Time:</strong> {datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")}</p>
-                <p>Please respond immediately.</p>
+                <h1>Emergency Alert Received</h1>
+                <p>Dear {user.firstName},</p>
+                <p>We have received your emergency alert: {alert.message}</p>
+                <p>Our team is responding and will contact you shortly.</p>
+                <p>Best regards,<br>The Naija Concierge Team</p>
             </body>
         </html>
         """
-        send_email(admin["email"], "EMERGENCY ALERT - Naija Concierge", emergency_html)
+        send_email(user.email, "Emergency Alert - Naija Concierge", alert_html)
+
+    notification_message = f"""
+    New emergency alert:
+    - Client: {user.firstName} {user.lastName}
+    - Message: {alert.message}
+    - Location: {alert.location or "Not provided"}
+    - Status: {created_alert["status"]}
+    """
+    send_admin_notification("New Emergency Alert", notification_message)
 
     return EmergencyAlert(
         id=str(created_alert["_id"]),
@@ -2226,14 +3607,14 @@ async def create_emergency_alert(
     )
 
 
+
 @app.put("/emergency-alerts/{alert_id}", response_model=EmergencyAlert)
 async def update_emergency_alert(
         alert_id: str,
         alert_update: EmergencyAlertUpdate,
-        current_user: UserInDB = Depends(get_current_active_user)
+        current_user: UserInDB = Depends(get_admin_user)
 ):
     try:
-        # Check if alert exists
         alert = db.emergency_alerts.find_one({"_id": ObjectId(alert_id)})
         if not alert:
             raise HTTPException(
@@ -2241,16 +3622,14 @@ async def update_emergency_alert(
                 detail="Emergency alert not found",
             )
 
-        # Regular users can only update their own alerts
-        if current_user.role != "admin" and alert["userId"] != str(current_user.id):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Not enough permissions",
-            )
-
-        # Update alert
         update_data = alert_update.dict(exclude_unset=True)
         if update_data:
+            if "message" in update_data and not update_data["message"].strip():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Message cannot be empty"
+                )
+
             update_data["updatedAt"] = datetime.utcnow()
             result = db.emergency_alerts.update_one(
                 {"_id": ObjectId(alert_id)},
@@ -2263,28 +3642,24 @@ async def update_emergency_alert(
                     detail="Emergency alert update failed",
                 )
 
-        # Get updated alert
         updated_alert = db.emergency_alerts.find_one({"_id": ObjectId(alert_id)})
 
-        # Notify user if status changed to resolved
-        if "status" in update_data and update_data["status"] == "resolved":
+        if "status" in update_data:
             user = get_user_by_id(updated_alert["userId"])
             if user:
-                resolved_html = f"""
+                status_update_html = f"""
                 <html>
                     <body>
-                        <h1>Emergency Alert Resolved</h1>
+                        <h1>Emergency Alert Status Update</h1>
                         <p>Dear {user.firstName},</p>
-                        <p>Your emergency alert has been resolved.</p>
-                        <p><strong>Message:</strong> {updated_alert["message"]}</p>
-                        <p><strong>Location:</strong> {updated_alert.get("location") or "Not provided"}</p>
-                        <p><strong>Status:</strong> {updated_alert["status"]}</p>
-                        <p>If you have any further concerns, please contact us.</p>
+                        <p>Your emergency alert has been updated to {updated_alert["status"]}.</p>
+                        <p>Message: {updated_alert["message"]}</p>
+                        <p>If you need further assistance, please contact us.</p>
                         <p>Best regards,<br>The Naija Concierge Team</p>
                     </body>
                 </html>
                 """
-                send_email(user.email, "Emergency Alert Resolved - Naija Concierge", resolved_html)
+                send_email(user.email, "Emergency Alert Status Update - Naija Concierge", status_update_html)
 
         return EmergencyAlert(
             id=str(updated_alert["_id"]),
@@ -2304,33 +3679,85 @@ async def update_emergency_alert(
 
 
 # Contact routes
+# @app.post("/contact")
+# async def send_contact_message(message: ContactMessage):
+#     try:
+#         # Store message in database
+#         message_dict = message.dict()
+#         message_dict["createdAt"] = datetime.utcnow()
+#         db.contact_messages.insert_one(message_dict)
+#
+#         # Send notification email to admin
+#         admin_users = list(db.users.find({"role": "admin"}))
+#         for admin in admin_users:
+#             contact_html = f"""
+#             <html>
+#                 <body>
+#                     <h1>New Contact Message</h1>
+#                     <p><strong>Name:</strong> {message.name}</p>
+#                     <p><strong>Email:</strong> {message.email}</p>
+#                     <p><strong>Phone:</strong> {message.phone or "Not provided"}</p>
+#                     <p><strong>Subject:</strong> {message.subject}</p>
+#                     <p><strong>Message:</strong></p>
+#                     <p>{message.message}</p>
+#                 </body>
+#             </html>
+#             """
+#             send_email(admin["email"], f"New Contact Message: {message.subject}", contact_html)
+#
+#         # Send confirmation email to user
+#         confirmation_html = f"""
+#         <html>
+#             <body>
+#                 <h1>Thank You for Contacting Us</h1>
+#                 <p>Dear {message.name},</p>
+#                 <p>We have received your message and will get back to you shortly.</p>
+#                 <p><strong>Subject:</strong> {message.subject}</p>
+#                 <p><strong>Message:</strong></p>
+#                 <p>{message.message}</p>
+#                 <p>Best regards,<br>The Naija Concierge Team</p>
+#             </body>
+#         </html>
+#         """
+#         send_email(message.email, "Thank You for Contacting Naija Concierge", confirmation_html)
+#
+#         return {"message": "Contact message sent successfully"}
+#     except Exception as e:
+#         logger.error(f"Error sending contact message: {e}")
+#         raise HTTPException(
+#             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+#             detail="Failed to send contact message",
+#         )
+
+
 @app.post("/contact")
 async def send_contact_message(message: ContactMessage):
     try:
-        # Store message in database
+        if not message.name.strip() or not message.subject.strip() or not message.message.strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Name, subject, and message are required"
+            )
+
         message_dict = message.dict()
         message_dict["createdAt"] = datetime.utcnow()
         db.contact_messages.insert_one(message_dict)
 
-        # Send notification email to admin
-        admin_users = list(db.users.find({"role": "admin"}))
-        for admin in admin_users:
-            contact_html = f"""
-            <html>
-                <body>
-                    <h1>New Contact Message</h1>
-                    <p><strong>Name:</strong> {message.name}</p>
-                    <p><strong>Email:</strong> {message.email}</p>
-                    <p><strong>Phone:</strong> {message.phone or "Not provided"}</p>
-                    <p><strong>Subject:</strong> {message.subject}</p>
-                    <p><strong>Message:</strong></p>
-                    <p>{message.message}</p>
-                </body>
-            </html>
-            """
-            send_email(admin["email"], f"New Contact Message: {message.subject}", contact_html)
+        contact_html = f"""
+        <html>
+            <body>
+                <h1>New Contact Message</h1>
+                <p><strong>Name:</strong> {message.name}</p>
+                <p><strong>Email:</strong> {message.email}</p>
+                <p><strong>Phone:</strong> {message.phone or "Not provided"}</p>
+                <p><strong>Subject:</strong> {message.subject}</p>
+                <p><strong>Message:</strong></p>
+                <p>{message.message}</p>
+            </body>
+        </html>
+        """
+        send_admin_notification(f"New Contact Message: {message.subject}", contact_html)
 
-        # Send confirmation email to user
         confirmation_html = f"""
         <html>
             <body>
@@ -2346,12 +3773,65 @@ async def send_contact_message(message: ContactMessage):
         """
         send_email(message.email, "Thank You for Contacting Naija Concierge", confirmation_html)
 
+        notification_message = f"""
+        New contact message received:
+        - Name: {message.name}
+        - Email: {message.email}
+        - Subject: {message.subject}
+        """
+        send_admin_notification("New Contact Message", notification_message)
+
         return {"message": "Contact message sent successfully"}
     except Exception as e:
         logger.error(f"Error sending contact message: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to send contact message",
+        )
+
+
+@app.post("/webhooks/booking-notification")
+async def booking_notification_webhook(data: Dict[str, Any]):
+    try:
+        booking_id = data.get("bookingId")
+        if not booking_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Booking ID required"
+            )
+
+        booking = db.bookings.find_one({"_id": ObjectId(booking_id)})
+        if not booking:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Booking not found"
+            )
+
+        service = db.services.find_one({"_id": ObjectId(booking["serviceId"])})
+        user = db.users.find_one({"_id": ObjectId(booking["userId"])})
+
+        if not service or not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Service or user not found"
+            )
+
+        notification_message = f"""
+        New Booking:
+        - Client: {user["firstName"]} {user["lastName"]}
+        - Service: {service["name"]}
+        - Date: {booking["bookingDate"].strftime("%Y-%m-%d %H:%M")}
+        - Status: {booking["status"]}
+        """
+
+        send_admin_notification("New Booking Notification", notification_message)
+
+        return {"message": "Notification processed successfully"}
+    except Exception as e:
+        logger.error(f"Error processing webhook: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to process webhook"
         )
 
 
@@ -2380,32 +3860,42 @@ async def get_documents(
 
 
 @app.post("/documents", response_model=Document)
-async def upload_document(
+async def create_document(
+        name: str = Form(...),
+        type: str = Form(...),
         file: UploadFile = File(...),
-        userId: str = Form(...),
-        documentType: str = Form(...),
         current_user: UserInDB = Depends(get_current_active_user)
 ):
-    # Regular users can only upload documents for themselves
-    if current_user.role != "admin" and userId != str(current_user.id):
+    if not name.strip():
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not enough permissions",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Document name is required"
+        )
+    if not type.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Document type is required"
         )
 
-    # Upload to Cloudinary
-    document_url = upload_file_to_cloudinary(file, folder=f"naija_concierge/documents/{documentType}")
+    file_url = upload_file_to_cloudinary(file, folder="naija_concierge/documents")
 
-    # Create document record
-    document = DocumentInDB(
-        userId=userId,
-        name=file.filename,
-        type=documentType,
-        url=document_url
+    document_in_db = DocumentInDB(
+        userId=str(current_user.id),
+        name=name,
+        type=type,
+        url=file_url
     )
+    result = db.documents.insert_one(document_in_db.dict(by_alias=True))
 
-    result = db.documents.insert_one(document.dict(by_alias=True))
     created_document = db.documents.find_one({"_id": result.inserted_id})
+
+    notification_message = f"""
+    New document uploaded:
+    - Client: {current_user.firstName} {current_user.lastName}
+    - Document: {name}
+    - Type: {type}
+    """
+    send_admin_notification("New Document Uploaded", notification_message)
 
     return Document(
         id=str(created_document["_id"]),
@@ -2416,14 +3906,12 @@ async def upload_document(
         uploadDate=created_document["uploadDate"]
     )
 
-
 @app.delete("/documents/{document_id}")
 async def delete_document(
         document_id: str,
         current_user: UserInDB = Depends(get_current_active_user)
 ):
     try:
-        # Check if document exists
         document = db.documents.find_one({"_id": ObjectId(document_id)})
         if not document:
             raise HTTPException(
@@ -2431,14 +3919,12 @@ async def delete_document(
                 detail="Document not found",
             )
 
-        # Regular users can only delete their own documents
         if current_user.role != "admin" and document["userId"] != str(current_user.id):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Not enough permissions",
             )
 
-        # Delete document
         result = db.documents.delete_one({"_id": ObjectId(document_id)})
 
         if result.deleted_count == 0:
