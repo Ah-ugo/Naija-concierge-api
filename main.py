@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, EmailStr, Field, GetJsonSchemaHandler, BeforeValidator
+from pydantic import BaseModel, EmailStr, Field, GetJsonSchemaHandler, BeforeValidator, ValidationError
 from pydantic.json_schema import JsonSchemaValue
 from pydantic_core import core_schema
 from typing import List, Optional, Dict, Any, Union, Annotated
@@ -26,6 +26,7 @@ import requests
 from enum import Enum
 import httpx
 from pymongo.collection import Collection
+import json
 
 # Configure logging
 logging.basicConfig(
@@ -629,6 +630,132 @@ class ChartDataResponse(BaseModel):
 class Timeframe(str, Enum):
     weekly = "weekly"
     monthly = "monthly"
+
+
+class GalleryImageBase(BaseModel):
+    title: str
+    description: Optional[str] = None
+    category: str
+    tags: List[str] = []
+
+class GalleryImageCreate(GalleryImageBase):
+    pass
+
+class GalleryImageUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    category: Optional[str] = None
+    tags: Optional[List[str]] = None
+
+
+class GalleryImageInDB(GalleryImageBase):
+    id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
+    image_url: str
+    created_by: str  # User ID
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    class Config:
+        allow_population_by_field_name = True
+        arbitrary_types_allowed = True
+        json_encoders = {ObjectId: str}
+
+class GalleryImage(GalleryImageBase):
+    id: str
+    image_url: str
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        orm_mode = True
+
+
+
+# class ContentBase(BaseModel):
+#     page: str  # e.g., "home", "about", "services", "contact", "booking"
+#     section: str  # e.g., "hero", "essence", "gallery", "footer"
+#     content_type: str  # e.g., "text", "image", "text_and_image"
+#     text: Optional[Dict[str, str]] = None  # e.g., {"title": "A Premium Luxury Escape", "subtitle": "Sorted Concierge Experience"}
+#     image_url: Optional[str] = None  # Cloudinary URL for images
+#     metadata: Optional[Dict] = None  # Additional data (e.g., category, tags, etc.)
+
+
+class ContentBase(BaseModel):
+    page: str
+    section: str
+    content_type: str
+    text: Optional[Dict[str, str]] = None
+    image_url: Optional[str] = None
+    metadata: Optional[Dict] = None
+
+class ContentCreate(ContentBase):
+    pass
+
+class ContentUpdate(BaseModel):
+    page: Optional[str] = None
+    section: Optional[str] = None
+    content_type: Optional[str] = None
+    text: Optional[Dict[str, str]] = None
+    image_url: Optional[str] = None
+    metadata: Optional[Dict] = None
+
+class ContentInDB(ContentBase):
+    id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
+    created_by: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    class Config:
+        allow_population_by_field_name = True
+        arbitrary_types_allowed = True
+        json_encoders = {ObjectId: str}
+        json_schema_extra = {
+            "example": {
+                "_id": "507f1f77bcf86cd799439011",
+                "page": "home",
+                "section": "hero",
+                "content_type": "text_and_image",
+                "text": {"title": "Welcome"},
+                "image_url": "https://example.com/image.jpg",
+                "metadata": {"key": "value"},
+                "created_by": "user123",
+                "created_at": "2023-01-01T00:00:00",
+                "updated_at": "2023-01-01T00:00:00"
+            }
+        }
+
+
+# class Content(ContentBase):
+#     id: str
+#     created_by: str
+#     created_at: datetime
+#     updated_at: datetime
+#
+#     class Config:
+#         orm_mode = True
+
+class Content(ContentBase):
+    id: str
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+class NewsletterSubscriber(BaseModel):
+    email: EmailStr
+    subscribed_at: datetime = Field(default_factory=datetime.utcnow)
+    is_active: bool = True
+
+class NewsletterSubscriberInDB(NewsletterSubscriber):
+    id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
+
+    class Config:
+        allow_population_by_field_name = True
+        arbitrary_types_allowed = True
+        json_encoders = {ObjectId: str}
+
+
+
 
 
 # Helper functions
@@ -1332,6 +1459,312 @@ async def upload_profile_image(
         )
 
     return {"profileImage": image_url}
+
+
+# Gallery
+
+# Add these endpoints to your existing FastAPI app
+@app.get("/gallery", response_model=List[GalleryImage])
+async def get_gallery(
+        skip: int = 0,
+        limit: int = 100,
+        category: Optional[str] = None,
+        tag: Optional[str] = None,
+        # current_user: UserInDB = Depends(get_current_active_user)
+):
+    """
+    Get all gallery images with optional filtering by category or tag.
+    """
+    query = {}
+
+    if category:
+        query["category"] = category
+    if tag:
+        query["tags"] = {"$in": [tag]}
+
+    try:
+        gallery_images = list(db.gallery.find(query).skip(skip).limit(limit))
+        return [
+            GalleryImage(
+                id=str(img["_id"]),
+                title=img["title"],
+                description=img.get("description"),
+                category=img["category"],
+                tags=img.get("tags", []),
+                image_url=img["image_url"],
+                created_by=img["created_by"],
+                created_at=img["created_at"],
+                updated_at=img["updated_at"]
+            ) for img in gallery_images
+        ]
+    except Exception as e:
+        logger.error(f"Error fetching gallery images: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch gallery images"
+        )
+
+
+@app.post("/gallery", response_model=GalleryImage)
+async def create_gallery_image(
+        title: str = Form(...),
+        description: Optional[str] = Form(None),
+        category: str = Form(...),
+        tags: str = Form(""),  # Comma-separated string
+        file: UploadFile = File(...),
+        current_user: UserInDB = Depends(get_current_active_user)
+):
+    """
+    Upload a new image to the gallery.
+    """
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File must be an image"
+        )
+
+    if not title.strip() or not category.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Title and category are required"
+        )
+
+    try:
+        # Upload image to Cloudinary
+        image_url = upload_file_to_cloudinary(file, folder="naija_concierge/gallery")
+
+        # Process tags
+        tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+
+        gallery_image = GalleryImageInDB(
+            title=title,
+            description=description,
+            category=category,
+            tags=tag_list,
+            image_url=image_url,
+            created_by=str(current_user.id))
+
+        result = db.gallery.insert_one(gallery_image.dict(by_alias=True))
+        created_image = db.gallery.find_one({"_id": result.inserted_id})
+
+        return GalleryImage(
+            id=str(created_image["_id"]),
+            title=created_image["title"],
+            description=created_image.get("description"),
+            category=created_image["category"],
+            tags=created_image.get("tags", []),
+            image_url=created_image["image_url"],
+            created_by=created_image["created_by"],
+            created_at=created_image["created_at"],
+            updated_at=created_image["updated_at"]
+        )
+    except Exception as e:
+        logger.error(f"Error creating gallery image: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create gallery image"
+        )
+
+
+@app.get("/gallery/{image_id}", response_model=GalleryImage)
+async def get_gallery_image(
+        image_id: str,
+        # current_user: UserInDB = Depends(get_current_active_user)
+):
+    """
+    Get a specific gallery image by ID.
+    """
+    try:
+        image = db.gallery.find_one({"_id": ObjectId(image_id)})
+        if not image:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Gallery image not found"
+            )
+
+        return GalleryImage(
+            id=str(image["_id"]),
+            title=image["title"],
+            description=image.get("description"),
+            category=image["category"],
+            tags=image.get("tags", []),
+            image_url=image["image_url"],
+            created_by=image["created_by"],
+            created_at=image["created_at"],
+            updated_at=image["updated_at"]
+        )
+    except Exception as e:
+        logger.error(f"Error fetching gallery image: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch gallery image"
+        )
+
+
+@app.put("/gallery/{image_id}", response_model=GalleryImage)
+async def update_gallery_image(
+        image_id: str,
+        image_update: GalleryImageUpdate,
+        current_user: UserInDB = Depends(get_current_active_user)
+):
+    """
+    Update a gallery image's metadata (title, description, category, tags).
+    """
+    try:
+        image = db.gallery.find_one({"_id": ObjectId(image_id)})
+        if not image:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Gallery image not found"
+            )
+
+        # Check if user is admin or the creator of the image
+        if current_user.role != "admin" and image["created_by"] != str(current_user.id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not enough permissions to update this image"
+            )
+
+        update_data = image_update.dict(exclude_unset=True)
+        if update_data:
+            update_data["updated_at"] = datetime.utcnow()
+            result = db.gallery.update_one(
+                {"_id": ObjectId(image_id)},
+                {"$set": update_data}
+            )
+
+            if result.modified_count == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Gallery image update failed"
+                )
+
+        updated_image = db.gallery.find_one({"_id": ObjectId(image_id)})
+
+        return GalleryImage(
+            id=str(updated_image["_id"]),
+            title=updated_image["title"],
+            description=updated_image.get("description"),
+            category=updated_image["category"],
+            tags=updated_image.get("tags", []),
+            image_url=updated_image["image_url"],
+            created_by=updated_image["created_by"],
+            created_at=updated_image["created_at"],
+            updated_at=updated_image["updated_at"]
+        )
+    except Exception as e:
+        logger.error(f"Error updating gallery image: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update gallery image"
+        )
+
+
+@app.delete("/gallery/{image_id}")
+async def delete_gallery_image(
+        image_id: str,
+        current_user: UserInDB = Depends(get_current_active_user)
+):
+    """
+    Delete a gallery image.
+    """
+    try:
+        image = db.gallery.find_one({"_id": ObjectId(image_id)})
+        if not image:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Gallery image not found"
+            )
+
+        # Check if user is admin or the creator of the image
+        if current_user.role != "admin" and image["created_by"] != str(current_user.id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not enough permissions to delete this image"
+            )
+
+        # Extract public_id from the URL (alternative solution)
+        if "image_url" in image:
+
+            url_parts = image["image_url"].split('/')
+            public_id_with_extension = '/'.join(url_parts[url_parts.index('upload') + 2:])
+            public_id = public_id_with_extension.split('.')[0]  # Remove file extension
+
+
+            cloudinary.uploader.destroy(public_id)
+
+        result = db.gallery.delete_one({"_id": ObjectId(image_id)})
+
+        if result.deleted_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Gallery image deletion failed"
+            )
+
+        return {"message": "Gallery image deleted successfully"}
+    except Exception as e:
+        logger.error(f"Error deleting gallery image: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete gallery image"
+        )
+
+
+@app.post("/gallery/{image_id}/image")
+async def update_gallery_image_file(
+        image_id: str,
+        file: UploadFile = File(...),
+        current_user: UserInDB = Depends(get_current_active_user)
+):
+    """
+    Update the image file for a gallery item.
+    """
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File must be an image"
+        )
+
+    try:
+        image = db.gallery.find_one({"_id": ObjectId(image_id)})
+        if not image:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Gallery image not found"
+            )
+
+        # Check if user is admin or the creator of the image
+        if current_user.role != "admin" and image["created_by"] != str(current_user.id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not enough permissions to update this image"
+            )
+
+        # Upload new image to Cloudinary
+        new_image_url = upload_file_to_cloudinary(file, folder="naija_concierge/gallery")
+
+        # Update the image URL in the database
+        result = db.gallery.update_one(
+            {"_id": ObjectId(image_id)},
+            {"$set": {
+                "image_url": new_image_url,
+                "updated_at": datetime.utcnow()
+            }}
+        )
+
+        if result.modified_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Failed to update gallery image"
+            )
+
+        return {"image_url": new_image_url}
+    except Exception as e:
+        logger.error(f"Error updating gallery image file: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update gallery image file"
+        )
 
 
 # crm
@@ -3282,6 +3715,209 @@ async def delete_subscription(
 
 
 
+# Content Endpoints
+
+@app.post("/content", response_model=Content)
+async def create_content(
+    page: str = Form(...),
+    section: str = Form(...),
+    content_type: str = Form(...),
+    text: Optional[str] = Form(None),
+    image_url: Optional[str] = Form(None),
+    metadata: Optional[str] = Form(None),
+    file: Optional[UploadFile] = File(None),
+    current_user: UserInDB = Depends(get_admin_user)
+):
+    """Create content with optimized field handling"""
+    try:
+        # Initialize with required fields
+        content_data = ContentInDB(
+            page=page,
+            section=section,
+            content_type=content_type,
+            created_by=str(current_user.id)
+        ).dict(by_alias=True)
+
+        # Handle text field
+        if text and text != "string":
+            content_data["text"] = parse_json_field(text, "text")
+
+        # Handle file/image_url
+        if file:
+            validate_image_file(file)
+            content_data["image_url"] = upload_to_cloudinary(
+                file,
+                f"content/{page}/{section}"
+            )
+        elif image_url and image_url != "string":
+            content_data["image_url"] = image_url
+
+        # Handle metadata
+        if metadata and metadata != "string":
+            content_data["metadata"] = parse_json_field(metadata, "metadata")
+
+        # Insert and return
+        result = db.content.insert_one(content_data)
+        created = db.content.find_one({"_id": result.inserted_id})
+        return convert_to_content_model(created)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Content creation error: {str(e)}", exc_info=True)
+        raise HTTPException(500, "Content creation failed")
+
+# Helper functions
+def parse_json_field(value: str, field_name: str) -> dict:
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        raise HTTPException(400, f"{field_name} must be valid JSON")
+
+def validate_image_file(file: UploadFile):
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(400, "Uploaded file must be an image")
+
+def upload_to_cloudinary(file: UploadFile, folder: str) -> str:
+    return upload_file_to_cloudinary(file, folder)
+
+def convert_to_content_model(doc: dict) -> Content:
+    return Content(
+        id=str(doc["_id"]),
+        page=doc["page"],
+        section=doc["section"],
+        content_type=doc["content_type"],
+        text=doc.get("text"),
+        image_url=doc.get("image_url"),
+        metadata=doc.get("metadata"),
+        created_by=doc["created_by"],
+        created_at=doc["created_at"],
+        updated_at=doc["updated_at"]
+    )
+
+@app.put("/content/{content_id}", response_model=Content)
+async def update_content(
+    content_id: str,
+    content_update: ContentUpdate,
+    file: Optional[UploadFile] = File(None),
+    current_user: UserInDB = Depends(get_admin_user)
+):
+    """
+    Update existing content by ID. Supports updating text, images, or both.
+    Only admins can update content.
+    """
+    try:
+        existing_content = db.content.find_one({"_id": ObjectId(content_id)})
+        if not existing_content:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Content not found"
+            )
+
+        update_data = content_update.dict(exclude_unset=True)
+        if file:
+            image_url = upload_file_to_cloudinary(file, folder=f"naija_concierge/{existing_content['page']}/{existing_content['section']}")
+            update_data["image_url"] = image_url
+
+        if update_data:
+            update_data["updated_at"] = datetime.utcnow()
+            db.content.update_one(
+                {"_id": ObjectId(content_id)},
+                {"$set": update_data}
+            )
+
+        updated_content = db.content.find_one({"_id": ObjectId(content_id)})
+        updated_content = serialize_object_id(updated_content)
+        return Content(**updated_content)
+    except Exception as e:
+        logger.error(f"Error updating content {content_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update content"
+        )
+
+@app.get("/content", response_model=List[Content])
+async def get_content(
+    skip: int = 0,
+    limit: int = 100,
+    page: Optional[str] = None,
+    section: Optional[str] = None
+):
+    """Retrieve content with proper model conversion"""
+    try:
+        query = {}
+        if page:
+            query["page"] = page
+        if section:
+            query["section"] = section
+
+        contents = list(db.content.find(query).skip(skip).limit(limit))
+        return [
+            Content(
+                id=str(content["_id"]),
+                page=content["page"],
+                section=content["section"],
+                content_type=content["content_type"],
+                text=content.get("text"),
+                image_url=content.get("image_url"),
+                metadata=content.get("metadata"),
+                created_by=content["created_by"],
+                created_at=content["created_at"],
+                updated_at=content["updated_at"]
+            )
+            for content in contents
+        ]
+    except Exception as e:
+        logger.error(f"Error retrieving content: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to retrieve content"
+        )
+
+
+@app.get("/content/{content_id}", response_model=Content)
+async def get_content_by_id(content_id: str):
+    """
+    Retrieve specific content by ID.
+    Accessible to all users.
+    """
+    try:
+        content = db.content.find_one({"_id": ObjectId(content_id)})
+        if not content:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Content not found"
+            )
+        content = serialize_object_id(content)
+        return Content(**content)
+    except Exception as e:
+        logger.error(f"Error retrieving content {content_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve content"
+        )
+
+@app.delete("/content/{content_id}", response_model=dict)
+async def delete_content(content_id: str, current_user: UserInDB = Depends(get_admin_user)):
+    """
+    Delete specific content by ID.
+    Only admins can delete content.
+    """
+    try:
+        result = db.content.delete_one({"_id": ObjectId(content_id)})
+        if result.deleted_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Content not found"
+            )
+        return {"message": "Content deleted successfully"}
+    except Exception as e:
+        logger.error(f"Error deleting content {content_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete content"
+        )
+
 
 
 # Blog routes
@@ -4166,6 +4802,111 @@ async def get_chart_data(timeframe: Timeframe = Timeframe.weekly):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to fetch chart data"
+        )
+
+
+@app.post("/newsletter/subscribe", status_code=status.HTTP_201_CREATED)
+async def subscribe_to_newsletter(
+        email: EmailStr = Form(...),
+):
+    """
+    Subscribe to the newsletter (no email verification)
+    """
+    try:
+        # Check if already subscribed
+        existing_subscriber = db.newsletter_subscribers.find_one({
+            "email": email,
+            "is_active": True
+        })
+
+        if existing_subscriber:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="This email is already subscribed"
+            )
+
+        # Create new subscriber
+        subscriber = NewsletterSubscriberInDB(email=email)
+
+        result = db.newsletter_subscribers.insert_one(subscriber.dict(by_alias=True))
+
+        # Send confirmation email
+        confirmation_html = f"""
+        <html>
+            <body>
+                <h1>Thanks for Subscribing!</h1>
+                <p>You've been successfully subscribed to our newsletter.</p>
+                <p>You'll receive updates and news from Naija Concierge.</p>
+                <p>To unsubscribe at any time, visit our website.</p>
+                <p>Best regards,<br>The Naija Concierge Team</p>
+            </body>
+        </html>
+        """
+
+        send_email(
+            email,
+            "Thanks for Subscribing - Naija Concierge",
+            confirmation_html
+        )
+
+        return {"message": "Successfully subscribed to newsletter"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error subscribing to newsletter: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to process subscription"
+        )
+
+
+@app.post("/newsletter/unsubscribe")
+async def unsubscribe_from_newsletter(
+        email: EmailStr = Form(...)
+):
+    """
+    Unsubscribe from the newsletter
+    """
+    try:
+        result = db.newsletter_subscribers.update_one(
+            {"email": email, "is_active": True},
+            {"$set": {"is_active": False}}
+        )
+
+        if result.modified_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Email not found in active subscriptions"
+            )
+
+        # Send confirmation email
+        confirmation_html = f"""
+        <html>
+            <body>
+                <h1>You're Unsubscribed</h1>
+                <p>You've been successfully unsubscribed from our newsletter.</p>
+                <p>We're sorry to see you go. You can resubscribe anytime.</p>
+                <p>Best regards,<br>The Naija Concierge Team</p>
+            </body>
+        </html>
+        """
+
+        send_email(
+            email,
+            "You're Unsubscribed - Naija Concierge",
+            confirmation_html
+        )
+
+        return {"message": "Successfully unsubscribed"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error unsubscribing from newsletter: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to process unsubscribe request"
         )
 
 
