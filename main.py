@@ -2631,6 +2631,53 @@ async def create_package(
         updatedAt=created_package["updatedAt"]
     )
 
+
+@app.get("/packages/{package_id}/convert")
+async def convert_package_price(
+    package_id: str,
+    currency: str,
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    """
+    Convert package price to the specified currency.
+    """
+    allowed_currencies = ["NGN", "USD", "EUR", "GBP"]
+    if currency not in allowed_currencies:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Currency must be one of {allowed_currencies}"
+        )
+
+    try:
+        package = db.packages.find_one({"_id": ObjectId(package_id)})
+        if not package:
+            raise HTTPException(
+                status_code=404,
+                detail="Package not found"
+            )
+    except Exception as e:
+        logger.error(f"Error fetching package: {e}")
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid package ID"
+        )
+
+    base_currency = "NGN"
+    amount = package["price"]
+
+    if currency != base_currency:
+        try:
+            exchange_rate = await get_exchange_rate(base_currency, currency)
+            amount = round(package["price"] * exchange_rate, 2)
+        except Exception as e:
+            logger.error(f"Exchange rate conversion failed: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to fetch exchange rate"
+            )
+
+    return {"convertedPrice": amount}
+
 @app.put("/packages/{package_id}", response_model=Package)
 async def update_package(
         package_id: str,
