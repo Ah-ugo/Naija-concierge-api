@@ -3434,12 +3434,14 @@ async def initiate_subscription_payment(
     subscription: SubscriptionInitiate,
     current_user: UserInDB = Depends(get_current_active_user)
 ):
+    # Validate permissions
     if current_user.role != "admin" and subscription.userId != str(current_user.id):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not enough permissions",
         )
 
+    # Validate package
     try:
         package = db.packages.find_one({"_id": ObjectId(subscription.packageId)})
         if not package:
@@ -3454,14 +3456,34 @@ async def initiate_subscription_payment(
             detail="Invalid package ID",
         )
 
+    # Validate preferred currency
+    allowed_currencies = ["NGN", "USD", "EUR", "GBP"]
+    preferred_currency = subscription.preferredCurrency or "NGN"
+    if preferred_currency not in allowed_currencies:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Currency must be one of {allowed_currencies}",
+        )
+
+    # Convert price to preferred currency if necessary
+    base_currency = "NGN"  # Assuming package price is stored in NGN
+    amount = package["price"]
+    if preferred_currency != base_currency:
+        try:
+            exchange_rate = await get_exchange_rate(base_currency, preferred_currency)
+            amount = round(package["price"] * exchange_rate, 2)
+        except HTTPException as e:
+            logger.error(f"Exchange rate conversion failed: {e}")
+            raise
+
     # Initiate Flutterwave payment
     tx_ref = f"sub_init_{subscription.userId}_{subscription.packageId}_{int(datetime.utcnow().timestamp())}"
     payment_response = await initialize_flutterwave_payment(
         email=current_user.email,
-        amount=package["price"],
-        currency="NGN",
+        amount=amount,
+        currency=preferred_currency,
         tx_ref=tx_ref,
-        country="NG"
+        country="NG"  # Adjust country if needed based on currency
     )
 
     # Log the full response for debugging
@@ -3477,7 +3499,7 @@ async def initiate_subscription_payment(
 
     # Extract transaction ID and payment link
     data = payment_response["data"]
-    transaction_id = data.get("tx_ref") or data.get("transaction_id") or tx_ref  # Fallback to tx_ref if no ID
+    transaction_id = data.get("tx_ref") or data.get("transaction_id") or tx_ref
     payment_link = data.get("link")
 
     if not payment_link:
@@ -3487,15 +3509,15 @@ async def initiate_subscription_payment(
             detail="Payment link not provided by Flutterwave",
         )
 
-    # Store pending transaction
+    # Store pending transaction with converted amount and currency
     transaction = TransactionInDB(
         tx_ref=tx_ref,
-        transactionId=transaction_id,  # Use the extracted transaction ID
+        transactionId=transaction_id,
         userId=subscription.userId,
         packageId=subscription.packageId,
-        amount=package["price"],
-        currency="NGN",
-        preferredCurrency=subscription.preferredCurrency,
+        amount=amount,  # Store converted amount
+        currency=preferred_currency,  # Store preferred currency
+        preferredCurrency=preferred_currency,
         status="pending",
         createdAt=datetime.utcnow(),
         updatedAt=datetime.utcnow()
