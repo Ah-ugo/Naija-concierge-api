@@ -27,6 +27,8 @@ from enum import Enum
 import httpx
 from pymongo.collection import Collection
 import json
+import hmac
+import hashlib
 
 # Configure logging
 logging.basicConfig(
@@ -75,13 +77,11 @@ AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME")
 
-
 FLUTTERWAVE_SECRET_KEY = os.getenv("FLUTTERWAVE_SECRET_KEY")
 FLUTTERWAVE_BASE_URL = "https://api.flutterwave.com/v3"
 FLUTTERWAVE_SECRET_HASH = os.getenv("FLUTTERWAVE_SECRET_HASH")
 EXCHANGE_RATE_API_KEY = os.getenv("EXCHANGE_RATE_API_KEY")
 EXCHANGE_RATE_BASE_URL = "https://v6.exchangerate-api.com/v6"
-
 
 # JWT configuration
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key")
@@ -105,18 +105,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount static files
-# app.mount("/static", StaticFiles(directory="static"), name="static")
-
+# Email configuration
 smtp_server = "smtp.gmail.com"
 smtp_port = 465
-email_address = "ahuekweprinceugo@gmail.com"  # Make sure this matches your sending address
-password = os.getenv("GMAIL_PASS")  # Use the environment variable
-recipient_email = "ahuekweprinceugo@gmail.com" #change to a test email
+email_address = "ahuekweprinceugo@gmail.com"
+password = os.getenv("GMAIL_PASS")
+recipient_email = "ahuekweprinceugo@gmail.com"
 
 print(password)
-subject = "Test Email from Python"  # Added a subject
-message_text = "This is a test email sent using smtplib and a context manager."  # Added message
+subject = "Test Email from Python"
+message_text = "This is a test email sent using smtplib and a context manager."
 
 msg = MIMEText(message_text)
 msg['Subject'] = subject
@@ -125,12 +123,10 @@ msg['To'] = recipient_email
 
 try:
     with smtplib.SMTP_SSL(smtp_server, smtp_port) as server:
-        server.ehlo()  # Identify ourselves to the server
-        # server.starttls()  # Put the connection in TLS mode
-        # server.ehlo()  # Re-identify after TLS negotiation
+        server.ehlo()
         server.login(email_address, password)
         server.sendmail(email_address, [recipient_email], msg.as_string())
-    print("Email sent successfully!")
+        print("Email sent successfully!")
 except Exception as e:
     print(f"Error sending email: {e}")
 
@@ -148,14 +144,38 @@ class PyObjectId(ObjectId):
 
     @classmethod
     def __get_pydantic_core_schema__(
-        cls,
-        source: type[Any],
-        handler: GetJsonSchemaHandler,
+            cls,
+            source: type[Any],
+            handler: GetJsonSchemaHandler,
     ) -> core_schema.CoreSchema:
         return core_schema.str_schema()
 
-# PyObjectId = Annotated[str, BeforeValidator(str)]
 
+# Enhanced Enums
+class ServiceCategoryType(str, Enum):
+    TIERED = "tiered"  # Has tiers with online payment (e.g., Sorted Lifestyle)
+    CONTACT_ONLY = "contact_only"  # Individual services, contact admin (e.g., Sorted Experience, Heritage)
+
+
+class BookingType(str, Enum):
+    CONSULTATION = "consultation"  # Contact-only booking
+    TIER_BOOKING = "tier_booking"  # Tier-based booking with payment
+    MEMBERSHIP_SERVICE = "membership_service"  # Membership required
+
+
+class MembershipTier(str, Enum):
+    BASIC = "basic"
+    PREMIUM = "premium"
+    VIP = "vip"
+
+
+class UserMembershipStatus(str, Enum):
+    ACTIVE = "active"
+    EXPIRED = "expired"
+    CANCELLED = "cancelled"
+
+
+# User Models (keeping existing structure)
 class UserBase(BaseModel):
     email: EmailStr
     firstName: str
@@ -178,7 +198,6 @@ class UserUpdate(BaseModel):
 
 
 class UserInDB(UserBase):
-    # id: Optional[Annotated[PyObjectId, Field(alias="_id", default=None)]]
     id: Optional[PyObjectId] = Field(alias="_id", default=None)
     role: str = "user"
     createdAt: datetime = Field(default_factory=datetime.utcnow)
@@ -192,10 +211,8 @@ class UserInDB(UserBase):
         }
     }
 
-    # Model validators for Pydantic v2
     @classmethod
     def model_validate(cls, obj, **kwargs):
-        # Convert ObjectId to string if present
         if isinstance(obj, dict) and '_id' in obj and isinstance(obj['_id'], ObjectId):
             obj['_id'] = str(obj['_id'])
         return super().model_validate(obj, **kwargs)
@@ -222,14 +239,112 @@ class TokenData(BaseModel):
     role: Optional[str] = None
 
 
+# Service Category Models
+class ServiceCategoryBase(BaseModel):
+    name: str  # e.g., "Sorted Lifestyle", "Sorted Experience", "Sorted Heritage"
+    description: str
+    category_type: ServiceCategoryType  # TIERED or CONTACT_ONLY
+    image: Optional[str] = None
+    is_active: bool = True
+
+
+class ServiceCategoryCreate(ServiceCategoryBase):
+    pass
+
+
+class ServiceCategoryUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    category_type: Optional[ServiceCategoryType] = None
+    image: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class ServiceCategoryInDB(ServiceCategoryBase):
+    id: Optional[PyObjectId] = Field(alias="_id", default=None)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    class Config:
+        allow_population_by_field_name = True
+        arbitrary_types_allowed = True
+        json_encoders = {ObjectId: str}
+
+
+class ServiceCategory(ServiceCategoryBase):
+    id: str
+    created_at: datetime
+    updated_at: datetime
+    tiers: List['ServiceTier'] = []  # For TIERED categories
+    services: List['Service'] = []  # For CONTACT_ONLY categories
+
+    class Config:
+        orm_mode = True
+        arbitrary_types_allowed = True
+
+
+# Service Tier Models (for tiered categories like Sorted Lifestyle)
+class ServiceTierBase(BaseModel):
+    name: str  # e.g., "Tier 1", "Tier 2"
+    description: str
+    price: float  # Price for this tier
+    category_id: str  # Reference to ServiceCategory
+    image: Optional[str] = None
+    features: List[str] = []  # Tier-level features
+    is_popular: bool = False
+    is_available: bool = True
+
+
+class ServiceTierCreate(ServiceTierBase):
+    pass
+
+
+class ServiceTierUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    price: Optional[float] = None
+    category_id: Optional[str] = None
+    image: Optional[str] = None
+    features: Optional[List[str]] = None
+    is_popular: Optional[bool] = None
+    is_available: Optional[bool] = None
+
+
+class ServiceTierInDB(ServiceTierBase):
+    id: Optional[PyObjectId] = Field(alias="_id", default=None)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    class Config:
+        allow_population_by_field_name = True
+        arbitrary_types_allowed = True
+        json_encoders = {ObjectId: str}
+
+
+class ServiceTier(ServiceTierBase):
+    id: str
+    created_at: datetime
+    updated_at: datetime
+    services: List['Service'] = []  # Services within this tier
+    category: Optional[ServiceCategory] = None
+
+    class Config:
+        orm_mode = True
+        arbitrary_types_allowed = True
+
+
+# Service Models
 class ServiceBase(BaseModel):
     name: str
     description: str
-    category: str
-    price: float
     image: Optional[str] = None
     duration: str
     isAvailable: bool = True
+    features: List[str] = []
+    requirements: List[str] = []
+    # References
+    category_id: Optional[str] = None  # Reference to ServiceCategory
+    tier_id: Optional[str] = None  # Reference to ServiceTier (for tiered services)
 
 
 class ServiceCreate(ServiceBase):
@@ -239,11 +354,13 @@ class ServiceCreate(ServiceBase):
 class ServiceUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
-    category: Optional[str] = None
-    price: Optional[float] = None
     image: Optional[str] = None
     duration: Optional[str] = None
     isAvailable: Optional[bool] = None
+    features: Optional[List[str]] = None
+    requirements: Optional[List[str]] = None
+    category_id: Optional[str] = None
+    tier_id: Optional[str] = None
 
 
 class ServiceInDB(ServiceBase):
@@ -261,12 +378,137 @@ class Service(ServiceBase):
     id: str
     createdAt: datetime
     updatedAt: datetime
+    category: Optional[ServiceCategory] = None
+    tier: Optional[ServiceTier] = None
 
     class Config:
         orm_mode = True
         arbitrary_types_allowed = True
 
 
+# Membership Models
+class MembershipBase(BaseModel):
+    name: str
+    description: str
+    tier: MembershipTier
+    price: float
+    duration_months: int
+    features: List[str]
+    image: Optional[str] = None
+    is_popular: bool = False
+
+
+class MembershipCreate(MembershipBase):
+    pass
+
+
+class MembershipUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    tier: Optional[MembershipTier] = None
+    price: Optional[float] = None
+    duration_months: Optional[int] = None
+    features: Optional[List[str]] = None
+    image: Optional[str] = None
+    is_popular: Optional[bool] = None
+
+
+class MembershipInDB(MembershipBase):
+    id: Optional[PyObjectId] = Field(alias="_id", default=None)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    class Config:
+        allow_population_by_field_name = True
+        arbitrary_types_allowed = True
+        json_encoders = {ObjectId: str}
+
+
+class Membership(MembershipBase):
+    id: str
+    created_at: datetime
+    updated_at: datetime
+
+
+# User Membership Models
+class UserMembershipBase(BaseModel):
+    user_id: str
+    membership_id: str
+    start_date: datetime
+    end_date: datetime
+    status: UserMembershipStatus = UserMembershipStatus.ACTIVE
+
+
+class UserMembershipCreate(UserMembershipBase):
+    pass
+
+
+class UserMembershipInDB(UserMembershipBase):
+    id: Optional[PyObjectId] = Field(alias="_id", default=None)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    class Config:
+        allow_population_by_field_name = True
+        arbitrary_types_allowed = True
+        json_encoders = {ObjectId: str}
+
+
+class UserMembership(UserMembershipBase):
+    id: str
+    created_at: datetime
+    updated_at: datetime
+    membership: Optional[Membership] = None
+
+
+# Booking Models
+class BookingBase(BaseModel):
+    userId: str
+    serviceId: Optional[str] = None  # For individual service bookings
+    tierId: Optional[str] = None  # For tier bookings
+    bookingDate: datetime
+    status: str = "pending"
+    specialRequests: Optional[str] = None
+    booking_type: BookingType
+    contact_preference: Optional[str] = "email"
+    payment_required: bool = False
+    payment_amount: Optional[float] = None
+
+
+class BookingCreate(BookingBase):
+    pass
+
+
+class BookingUpdate(BaseModel):
+    bookingDate: Optional[datetime] = None
+    status: Optional[str] = None
+    specialRequests: Optional[str] = None
+    contact_preference: Optional[str] = None
+
+
+class BookingInDB(BookingBase):
+    id: PyObjectId = Field(default_factory=ObjectId, alias="_id")
+    createdAt: datetime = Field(default_factory=datetime.utcnow)
+    updatedAt: datetime = Field(default_factory=datetime.utcnow)
+
+    class Config:
+        arbitrary_types_allowed = True
+        json_encoders = {ObjectId: str}
+
+
+class Booking(BookingBase):
+    id: str
+    createdAt: datetime
+    updatedAt: datetime
+    service: Optional[Service] = None
+    tier: Optional[ServiceTier] = None
+
+    class Config:
+        arbitrary_types_allowed = True
+        json_encoders = {ObjectId: str}
+
+
+# Keep existing models (CRM, Package, etc.)
 class CRMClientBase(BaseModel):
     clientName: str
     contactInfo: Dict[str, str]
@@ -276,8 +518,10 @@ class CRMClientBase(BaseModel):
     notes: Optional[str] = None
     dueDate: Optional[datetime] = None
 
+
 class CRMClientCreate(CRMClientBase):
     pass
+
 
 class CRMClientUpdate(BaseModel):
     clientName: Optional[str] = None
@@ -299,6 +543,7 @@ class CRMClientInDB(CRMClientBase):
         arbitrary_types_allowed = True
         json_encoders = {ObjectId: str}
 
+
 class CRMClient(CRMClientBase):
     id: str
     createdAt: datetime
@@ -307,246 +552,15 @@ class CRMClient(CRMClientBase):
     class Config:
         orm_mode = True
 
+
 class AirtableBookingForm(BaseModel):
     clientName: str
     email: EmailStr
     phone: Optional[str] = None
-    serviceId: str
+    serviceId: Optional[str] = None  # For individual service booking
+    tierId: Optional[str] = None  # For tier booking
     bookingDate: datetime
     specialRequests: Optional[str] = None
-
-
-# class Package(BaseModel):
-#     id: str
-#     name: str
-#     description: str
-#     price: float  # Price in NGN
-#     duration: int
-#     features: List[str]
-#     image: Optional[str]
-#     type: str
-#     isPopular: bool
-#     createdAt: datetime
-#     updatedAt: datetime
-
-class PackageBase(BaseModel):
-    name: str
-    description: str
-    price: float
-    duration: str
-    features: List[str]
-    image: Optional[str] = None
-    type: str
-    isPopular: bool = False
-
-
-class PackageCreate(PackageBase):
-    pass
-
-
-class PackageUpdate(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
-    price: Optional[float] = None
-    duration: Optional[str] = None
-    features: Optional[List[str]] = None
-    image: Optional[str] = None
-    type: Optional[str] = None
-    isPopular: Optional[bool] = None
-
-
-class PackageInDB(PackageBase):
-    id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
-    createdAt: datetime = Field(default_factory=datetime.utcnow)
-    updatedAt: datetime = Field(default_factory=datetime.utcnow)
-
-    class Config:
-        allow_population_by_field_name = True
-        arbitrary_types_allowed = True
-        json_encoders = {ObjectId: str}
-
-
-class Package(PackageBase):
-    id: str
-    createdAt: datetime
-    updatedAt: datetime
-
-    class Config:
-        orm_mode = True
-
-
-class BookingBase(BaseModel):
-    userId: str
-    serviceId: str
-    bookingDate: datetime
-    status: str = "pending"
-    specialRequests: Optional[str] = None
-
-
-class BookingCreate(BookingBase):
-    pass
-
-
-class BookingUpdate(BaseModel):
-    bookingDate: Optional[datetime] = None
-    status: Optional[str] = None
-    specialRequests: Optional[str] = None
-
-
-class BookingInDB(BookingBase):
-    id: PyObjectId = Field(default_factory=ObjectId, alias="_id")
-    createdAt: datetime = Field(default_factory=datetime.utcnow)
-    updatedAt: datetime = Field(default_factory=datetime.utcnow)
-
-    class Config:
-        # allow_population_by_field_name = True
-        arbitrary_types_allowed = True
-        json_encoders = {ObjectId: str}
-
-
-class Booking(BookingBase):
-    id: str
-    createdAt: datetime
-    updatedAt: datetime
-    service: Optional[Service] = None
-
-    class Config:
-        arbitrary_types_allowed = True
-        json_encoders = {ObjectId: str}
-
-
-class SubscriptionStatus(str, Enum):
-    active = "active"
-    inactive = "inactive"
-    cancelled = "cancelled"
-
-
-class SubscriptionInitiate(BaseModel):
-    userId: str
-    packageId: str
-    preferredCurrency: Optional[str] = "NGN"
-
-
-
-
-class SubscriptionBase(BaseModel):
-    userId: str
-    packageId: str
-    startDate: datetime
-    endDate: datetime
-    status: str = "active"
-
-
-class SubscriptionCreate(SubscriptionBase):
-    pass
-
-
-class SubscriptionUpdate(BaseModel):
-    startDate: Optional[datetime] = None
-    endDate: Optional[datetime] = None
-    status: Optional[SubscriptionStatus]
-
-
-class SubscriptionInDB(SubscriptionBase):
-    id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
-    createdAt: datetime = Field(default_factory=datetime.utcnow)
-    updatedAt: datetime = Field(default_factory=datetime.utcnow)
-
-    class Config:
-        allow_population_by_field_name = True
-        arbitrary_types_allowed = True
-        json_encoders = {ObjectId: str}
-
-
-class Subscription(SubscriptionBase):
-    id: str
-    createdAt: datetime
-    updatedAt: datetime
-    package: Optional[Package] = None
-
-    class Config:
-        orm_mode = True
-
-
-class BlogBase(BaseModel):
-    title: str
-    slug: str
-    content: str
-    excerpt: str
-    coverImage: Optional[str] = None
-    author: Dict[str, str]
-    tags: List[str]
-
-
-class BlogCreate(BlogBase):
-    pass
-
-
-class BlogUpdate(BaseModel):
-    title: Optional[str] = None
-    slug: Optional[str] = None
-    content: Optional[str] = None
-    excerpt: Optional[str] = None
-    coverImage: Optional[str] = None
-    author: Optional[Dict[str, str]] = None
-    tags: Optional[List[str]] = None
-
-
-class BlogInDB(BlogBase):
-    id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
-    createdAt: datetime = Field(default_factory=datetime.utcnow)
-    updatedAt: datetime = Field(default_factory=datetime.utcnow)
-
-    class Config:
-        allow_population_by_field_name = True
-        arbitrary_types_allowed = True
-        json_encoders = {ObjectId: str}
-
-
-class Blog(BlogBase):
-    id: str
-    createdAt: datetime
-    updatedAt: datetime
-
-    class Config:
-        orm_mode = True
-
-
-class EmergencyAlertBase(BaseModel):
-    userId: str
-    message: str
-    location: Optional[str] = None
-    status: str = "pending"
-
-
-class EmergencyAlertCreate(EmergencyAlertBase):
-    pass
-
-
-class EmergencyAlertUpdate(BaseModel):
-    message: Optional[str] = None
-    location: Optional[str] = None
-    status: Optional[str] = None
-
-
-class EmergencyAlertInDB(EmergencyAlertBase):
-    id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
-    createdAt: datetime = Field(default_factory=datetime.utcnow)
-    updatedAt: datetime = Field(default_factory=datetime.utcnow)
-
-    class Config:
-        allow_population_by_field_name = True
-        arbitrary_types_allowed = True
-        json_encoders = {ObjectId: str}
-
-
-class EmergencyAlert(EmergencyAlertBase):
-    id: str
-    createdAt: datetime
-    updatedAt: datetime
-
-    class Config:
-        orm_mode = True
 
 
 class ContactMessage(BaseModel):
@@ -557,194 +571,11 @@ class ContactMessage(BaseModel):
     message: str
 
 
-class DocumentBase(BaseModel):
-    userId: str
-    name: str
-    type: str
-    url: str
-
-
-class DocumentCreate(DocumentBase):
-    pass
-
-
-class DocumentInDB(DocumentBase):
-    id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
-    uploadDate: datetime = Field(default_factory=datetime.utcnow)
-
-    class Config:
-        allow_population_by_field_name = True
-        arbitrary_types_allowed = True
-        json_encoders = {ObjectId: str}
-
-
-class Document(DocumentBase):
-    id: str
-    uploadDate: datetime
-
-    class Config:
-        orm_mode = True
-
-
-# class TransactionCreate(BaseModel):
-#     subscriptionId: str
-#     amount: float
-#     currency: str
-#     transactionId: str
-#     status: str
-
-class TransactionCreate(BaseModel):
-    tx_ref: str
-    transactionId: str
-    userId: str
-    packageId: str
-    amount: float  # Amount in NGN
-    currency: str  # Base currency (NGN)
-    preferredCurrency: str  # User's preferred currency
-    status: str
-
-
-class TransactionInDB(TransactionCreate):
-    createdAt: datetime
-    updatedAt: datetime
-
-class Transaction(TransactionInDB):
-    id: str
-
-
-
-class BookingDataPoint(BaseModel):
-    name: str
-    bookings: int
-    completed: int
-
-class RevenueDataPoint(BaseModel):
-    name: str
-    revenue: float
-
-class ChartDataResponse(BaseModel):
-    bookingData: List[BookingDataPoint]
-    revenueData: List[RevenueDataPoint]
-
-
-class Timeframe(str, Enum):
-    weekly = "weekly"
-    monthly = "monthly"
-
-
-class GalleryImageBase(BaseModel):
-    title: str
-    description: Optional[str] = None
-    category: str
-    tags: List[str] = []
-
-class GalleryImageCreate(GalleryImageBase):
-    pass
-
-class GalleryImageUpdate(BaseModel):
-    title: Optional[str] = None
-    description: Optional[str] = None
-    category: Optional[str] = None
-    tags: Optional[List[str]] = None
-
-
-class GalleryImageInDB(GalleryImageBase):
-    id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
-    image_url: str
-    created_by: str  # User ID
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
-
-    class Config:
-        allow_population_by_field_name = True
-        arbitrary_types_allowed = True
-        json_encoders = {ObjectId: str}
-
-class GalleryImage(GalleryImageBase):
-    id: str
-    image_url: str
-    created_by: str
-    created_at: datetime
-    updated_at: datetime
-
-    class Config:
-        orm_mode = True
-
-
-
-# class ContentBase(BaseModel):
-#     page: str  # e.g., "home", "about", "services", "contact", "booking"
-#     section: str  # e.g., "hero", "essence", "gallery", "footer"
-#     content_type: str  # e.g., "text", "image", "text_and_image"
-#     text: Optional[Dict[str, str]] = None  # e.g., {"title": "A Premium Luxury Escape", "subtitle": "Sorted Concierge Experience"}
-#     image_url: Optional[str] = None  # Cloudinary URL for images
-#     metadata: Optional[Dict] = None  # Additional data (e.g., category, tags, etc.)
-
-
-class ContentBase(BaseModel):
-    page: str
-    section: str
-    content_type: str
-    text: Optional[Dict[str, str]] = None
-    image_url: Optional[str] = None
-    metadata: Optional[Dict] = None
-
-class ContentCreate(ContentBase):
-    pass
-
-class ContentUpdate(BaseModel):
-    page: Optional[str] = None
-    section: Optional[str] = None
-    content_type: Optional[str] = None
-    text: Optional[Dict[str, str]] = None
-    image_url: Optional[str] = None
-    metadata: Optional[Dict] = None
-
-class ContentInDB(ContentBase):
-    id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
-    created_by: str
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
-
-    class Config:
-        allow_population_by_field_name = True
-        arbitrary_types_allowed = True
-        json_encoders = {ObjectId: str}
-        json_schema_extra = {
-            "example": {
-                "_id": "507f1f77bcf86cd799439011",
-                "page": "home",
-                "section": "hero",
-                "content_type": "text_and_image",
-                "text": {"title": "Welcome"},
-                "image_url": "https://example.com/image.jpg",
-                "metadata": {"key": "value"},
-                "created_by": "user123",
-                "created_at": "2023-01-01T00:00:00",
-                "updated_at": "2023-01-01T00:00:00"
-            }
-        }
-
-
-# class Content(ContentBase):
-#     id: str
-#     created_by: str
-#     created_at: datetime
-#     updated_at: datetime
-#
-#     class Config:
-#         orm_mode = True
-
-class Content(ContentBase):
-    id: str
-    created_by: str
-    created_at: datetime
-    updated_at: datetime
-
 class NewsletterSubscriber(BaseModel):
     email: EmailStr
     subscribed_at: datetime = Field(default_factory=datetime.utcnow)
     is_active: bool = True
+
 
 class NewsletterSubscriberInDB(NewsletterSubscriber):
     id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
@@ -753,9 +584,6 @@ class NewsletterSubscriberInDB(NewsletterSubscriber):
         allow_population_by_field_name = True
         arbitrary_types_allowed = True
         json_encoders = {ObjectId: str}
-
-
-
 
 
 # Helper functions
@@ -770,19 +598,10 @@ def get_password_hash(password):
 def get_user(email: str):
     user = db.users.find_one({"email": email})
     if user:
-        user["_id"] = str(user["_id"])  # Convert ObjectId to string
+        user["_id"] = str(user["_id"])
         return UserInDB(**user)
     return None
 
-
-# def get_user_by_id(user_id: str):
-#     try:
-#         user = db.users.find_one({"_id": ObjectId(user_id)})
-#         if user:
-#             return UserInDB(**user)
-#     except Exception as e:
-#         logger.error(f"Error getting user by ID: {e}")
-#     return None
 
 def get_user_by_id(user_id: str):
     try:
@@ -790,7 +609,7 @@ def get_user_by_id(user_id: str):
         if not user:
             logger.error(f"User not found for ID: {user_id}")
             return None
-        user["_id"] = str(user["_id"])  # Convert ObjectId to string
+        user["_id"] = str(user["_id"])
         return UserInDB(**user)
     except ValidationError as ve:
         logger.error(f"Validation error for user ID {user_id}: {ve}")
@@ -853,13 +672,23 @@ async def get_admin_user(current_user: UserInDB = Depends(get_current_user)):
     return current_user
 
 
+def check_user_membership(user_id: str) -> bool:
+    """Helper function to check if user has active membership"""
+    active_membership = db.user_memberships.find_one({
+        "user_id": user_id,
+        "status": UserMembershipStatus.ACTIVE,
+        "end_date": {"$gt": datetime.utcnow()}
+    })
+    return active_membership is not None
+
+
 def send_email(to_email: str, subject: str, html_content: str):
     """Send email using SMTP, with improved connection handling."""
-    smtp_server = os.getenv("SMTP_HOST")  # Use SMTP_HOST
+    smtp_server = os.getenv("SMTP_HOST")
     smtp_port = int(os.getenv("SMTP_PORT", "465"))
     smtp_username = os.getenv("SMTP_USERNAME")
     smtp_password = os.getenv("SMTP_PASSWORD")
-    from_email = os.getenv("GMAIL_ADDRESS")  # Use GMAIL_ADDRESS, ensure it's the sender
+    from_email = os.getenv("GMAIL_ADDRESS")
 
     message = MIMEMultipart("alternative")
     message["Subject"] = subject
@@ -869,13 +698,12 @@ def send_email(to_email: str, subject: str, html_content: str):
     html_part = MIMEText(html_content, "html")
     message.attach(html_part)
 
-    server = None  # Initialize server outside the try block
+    server = None
     try:
         server = smtplib.SMTP_SSL(smtp_server, smtp_port)
-        # server.starttls()  # Upgrade to secure connection
         server.login(smtp_username, smtp_password)
         server.sendmail(from_email, to_email, message.as_string())
-        logger.info(f"Email sent successfully to {to_email}")  # Add logging
+        logger.info(f"Email sent successfully to {to_email}")
         return True
     except Exception as e:
         logger.error(f"Error sending email: {e}")
@@ -883,25 +711,14 @@ def send_email(to_email: str, subject: str, html_content: str):
     finally:
         if server:
             try:
-                server.quit()  # Ensure server.quit() is always called
+                server.quit()
             except Exception as e:
                 logger.error(f"Error closing SMTP connection: {e}")
 
 
 def send_admin_notification(subject: str, message: str):
-    """
-    Send an email notification to all admin users.
-
-    Args:
-        subject (str): Email subject
-        message (str): Email body (plain text or HTML)
-        db (Collection): MongoDB users collection
-
-    Raises:
-        HTTPException: If no admins are found or email sending fails
-    """
+    """Send an email notification to all admin users."""
     try:
-        # Find all admin users
         admin_users = db.users.find({"role": "admin"})
         admin_emails = [user["email"] for user in admin_users]
 
@@ -912,14 +729,13 @@ def send_admin_notification(subject: str, message: str):
                 detail="No admin users found to notify"
             )
 
-        # Send email to each admin
         for email in admin_emails:
             try:
                 send_email(email, subject, message)
                 logger.info(f"Notification sent to admin: {email}")
             except Exception as e:
                 logger.error(f"Failed to send notification to {email}: {e}")
-                continue  # Continue with next admin if one fails
+                continue
 
         logger.info(f"Notifications sent to {len(admin_emails)} admins")
 
@@ -931,6 +747,7 @@ def send_admin_notification(subject: str, message: str):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to send admin notifications"
         )
+
 
 def upload_file_to_cloudinary(file: UploadFile, folder: str = "naija_concierge"):
     """Upload file to Cloudinary and return the URL"""
@@ -950,21 +767,6 @@ def upload_file_to_cloudinary(file: UploadFile, folder: str = "naija_concierge")
         )
 
 
-def serialize_object_id(obj):
-    """Convert ObjectId to string in a dictionary"""
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            if isinstance(v, ObjectId):
-                obj[k] = str(v)
-            elif isinstance(v, dict):
-                serialize_object_id(v)
-            elif isinstance(v, list):
-                for item in v:
-                    if isinstance(item, dict):
-                        serialize_object_id(item)
-    return obj
-
-
 def add_to_airtable(booking_data: Dict) -> Dict:
     try:
         headers = {
@@ -973,7 +775,6 @@ def add_to_airtable(booking_data: Dict) -> Dict:
         }
         url = f"https://api.airtable.com/v0/{os.getenv('AIRTABLE_BASE_ID')}/{os.getenv('AIRTABLE_TABLE_NAME')}"
 
-        # Ensure all values are JSON-serializable
         serialized_data = {
             "records": [{
                 "fields": {
@@ -1001,164 +802,6 @@ def add_to_airtable(booking_data: Dict) -> Dict:
             detail=f"Failed to add to Airtable: {str(e)}"
         )
 
-async def get_exchange_rate(from_currency: str, to_currency: str) -> float:
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.get(
-                f"{EXCHANGE_RATE_BASE_URL}/{EXCHANGE_RATE_API_KEY}/latest/{from_currency}"
-            )
-            response.raise_for_status()
-            rates = response.json().get("conversion_rates", {})
-            return rates.get(to_currency, 1.0)
-        except Exception as e:
-            logger.error(f"Error fetching exchange rate: {e}")
-            raise HTTPException(status_code=500, detail="Failed to fetch exchange rate")
-
-
-async def initialize_flutterwave_payment(
-        email: str,
-        amount: float,
-        currency: str,
-        tx_ref: str,
-        country: str
-):
-    url = "https://api.flutterwave.com/v3/payments"
-    headers = {
-        "Authorization": f"Bearer {os.getenv('FLUTTERWAVE_SECRET_KEY')}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "tx_ref": tx_ref,
-        "amount": amount,
-        "currency": currency,
-        "redirect_url": os.getenv("FLUTTERWAVE_REDIRECT_URL", "https://yourapp.com/redirect"),
-        "customer": {
-            "email": email
-        },
-        "customizations": {
-            "title": "Subscription Payment",
-            "description": "Payment for subscription package"
-        }
-    }
-
-    async with httpx.AsyncClient() as client:
-        response = await client.post(url, json=payload, headers=headers)
-        response.raise_for_status()  # Raise an error for non-200 responses
-        return response.json()
-
-async def verify_flutterwave_payment(transaction_id: str) -> dict:
-    async with httpx.AsyncClient() as client:
-        try:
-            headers = {"Authorization": f"Bearer {FLUTTERWAVE_SECRET_KEY}"}
-            response = await client.get(
-                f"{FLUTTERWAVE_BASE_URL}/transactions/{transaction_id}/verify",
-                headers=headers
-            )
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            logger.error(f"Error verifying Flutterwave payment: {e}")
-            raise HTTPException(status_code=500, detail="Failed to verify payment")
-
-def verify_webhook_signature(payload: bytes, signature: str) -> bool:
-    computed_hash = hmac.new(
-        FLUTTERWAVE_SECRET_HASH.encode(),
-        payload,
-        hashlib.sha256
-    ).hexdigest()
-    return hmac.compare_digest(computed_hash, signature)
-
-async def create_subscription_from_transaction(transaction: dict):
-    try:
-        package = db.packages.find_one({"_id": ObjectId(transaction["packageId"])})
-        if not package:
-            logger.error(f"Package not found: {transaction['packageId']}")
-            return None
-
-        active_subscription = db.subscriptions.find_one({
-            "userId": transaction["userId"],
-            "status": "active"
-        })
-        if active_subscription:
-            logger.error(f"User {transaction['userId']} already has an active subscription")
-            return None
-
-        subscription_in_db = SubscriptionInDB(
-            userId=transaction["userId"],
-            packageId=transaction["packageId"],
-            startDate=datetime.utcnow(),
-            endDate=datetime.utcnow() + timedelta(days=package["duration"]),
-            status=SubscriptionStatus.active,
-            createdAt=datetime.utcnow(),
-            updatedAt=datetime.utcnow()
-        )
-        result = db.subscriptions.insert_one(subscription_in_db.dict(by_alias=True))
-        created_subscription = db.subscriptions.find_one({"_id": result.inserted_id})
-
-        package_obj = Package(
-            id=str(package["_id"]),
-            name=package["name"],
-            description=package["description"],
-            price=package["price"],
-            duration=package["duration"],
-            features=package["features"],
-            image=package.get("image"),
-            type=package["type"],
-            isPopular=package["isPopular"],
-            createdAt=package["createdAt"],
-            updatedAt=package["updatedAt"]
-        )
-
-        user = get_user_by_id(transaction["userId"])
-        if user:
-            subscription_html = f"""
-            <html>
-                <body>
-                    <h1>Subscription Confirmation</h1>
-                    <p>Dear {user["firstName"]},</p>
-                    <p>Your subscription to the {package["name"]} package has been successfully created.</p>
-                    <p>Subscription Details:</p>
-                    <ul>
-                        <li>Package: {package["name"]}</li>
-                        <li>Start Date: {created_subscription["startDate"].strftime("%Y-%m-%d")}</li>
-                        <li>End Date: {created_subscription["endDate"].strftime("%Y-%m-%d")}</li>
-                        <li>Price: {transaction["preferredCurrency"]} (equivalent to NGN {transaction["amount"]})</li>
-                        <li>Status: {created_subscription["status"]}</li>
-                    </ul>
-                    <p>Thank you for choosing Naija Concierge. If you have any questions, please contact us.</p>
-                    <p>Best regards,<br>The Naija Concierge Team</p>
-                </body>
-            </html>
-            """
-            send_email(user["email"], "Subscription Confirmation - Naija Concierge", subscription_html)
-
-        notification_message = f"""
-        New subscription created:
-        - Client: {user["firstName"]} {user["lastName"]}
-        - Package: {package["name"]}
-        - Start Date: {created_subscription["startDate"].strftime("%Y-%m-%d")}
-        - Status: {created_subscription["status"]}
-        - Amount Paid: {transaction["preferredCurrency"]} (equivalent to NGN {transaction["amount"]})
-        """
-        send_admin_notification("New Subscription Created", notification_message)
-
-        return Subscription(
-            id=str(created_subscription["_id"]),
-            userId=created_subscription["userId"],
-            packageId=created_subscription["packageId"],
-            startDate=created_subscription["startDate"],
-            endDate=created_subscription["endDate"],
-            status=created_subscription["status"],
-            createdAt=created_subscription["createdAt"],
-            updatedAt=created_subscription["updatedAt"],
-            package=package_obj
-        )
-    except Exception as e:
-        logger.error(f"Error creating subscription from transaction: {e}")
-        return None
-
-
-
 
 # Routes
 @app.get("/")
@@ -1166,17 +809,15 @@ async def root():
     return {"message": "Welcome to Naija Concierge API"}
 
 
-# Auth routes
+# Auth routes (keeping existing)
 @app.post("/auth/register", response_model=Token)
 async def register(user: UserCreate):
-    # Check if user already exists
     if db.users.find_one({"email": user.email}):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email already registered",
         )
 
-    # Create new user
     hashed_password = get_password_hash(user.password)
     user_dict = user.dict()
     del user_dict["password"]
@@ -1186,16 +827,13 @@ async def register(user: UserCreate):
         role="user"
     )
 
-    # Insert into database
     result = db.users.insert_one(user_in_db.dict(by_alias=True))
 
-    # Create access token
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": user.email}, expires_delta=access_token_expires
     )
 
-    # Get created user
     created_user = db.users.find_one({"_id": result.inserted_id})
     user_response = User(
         id=str(created_user["_id"]),
@@ -1210,7 +848,6 @@ async def register(user: UserCreate):
         updatedAt=created_user["updatedAt"]
     )
 
-    # Send welcome email
     welcome_html = f"""
     <html>
         <body>
@@ -1281,1101 +918,872 @@ async def get_me(current_user: UserInDB = Depends(get_current_active_user)):
     )
 
 
-# User routes
-@app.get("/users", response_model=List[User])
-async def get_users(
+# Service Category routes
+@app.get("/service-categories", response_model=List[ServiceCategory])
+async def get_service_categories(
         skip: int = 0,
         limit: int = 100,
-        current_user: UserInDB = Depends(get_admin_user)
+        category_type: Optional[ServiceCategoryType] = None
 ):
-    users = list(db.users.find().skip(skip).limit(limit))
-    return [
-        User(
-            id=str(user["_id"]),
-            email=user["email"],
-            firstName=user["firstName"],
-            lastName=user["lastName"],
-            phone=user.get("phone"),
-            address=user.get("address"),
-            profileImage=user.get("profileImage"),
-            role=user["role"],
-            createdAt=user["createdAt"],
-            updatedAt=user["updatedAt"]
-        ) for user in users
-    ]
+    """Get all service categories with their tiers/services"""
+    query = {}
+    if category_type:
+        query["category_type"] = category_type
 
+    categories = list(db.service_categories.find(query).skip(skip).limit(limit))
+    result = []
 
-@app.get("/users/{user_id}", response_model=User)
-async def get_user_details(
-        user_id: str,
-        current_user: UserInDB = Depends(get_current_active_user)
-):
-    # Only admins can view other users' details
-    if str(current_user.id) != user_id and current_user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not enough permissions",
-        )
+    for category in categories:
+        tiers = []
+        services = []
 
-    user = get_user_by_id(user_id)
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found",
-        )
+        if category["category_type"] == ServiceCategoryType.TIERED:
+            # Get tiers for this category
+            tier_docs = list(db.service_tiers.find({"category_id": str(category["_id"])}))
+            for tier_doc in tier_docs:
+                # Get services for this tier
+                tier_services = list(db.services.find({"tier_id": str(tier_doc["_id"])}))
+                tier_service_objects = []
 
-    return User(
-        id=str(user.id),
-        email=user.email,
-        firstName=user.firstName,
-        lastName=user.lastName,
-        phone=user.phone,
-        address=user.address,
-        profileImage=user.profileImage,
-        role=user.role,
-        createdAt=user.createdAt,
-        updatedAt=user.updatedAt
-    )
+                for service in tier_services:
+                    tier_service_objects.append(
+                        Service(
+                            id=str(service["_id"]),
+                            name=service["name"],
+                            description=service["description"],
+                            image=service.get("image"),
+                            duration=service["duration"],
+                            isAvailable=service["isAvailable"],
+                            features=service.get("features", []),
+                            requirements=service.get("requirements", []),
+                            category_id=service.get("category_id"),
+                            tier_id=service.get("tier_id"),
+                            createdAt=service["createdAt"],
+                            updatedAt=service["updatedAt"]
+                        )
+                    )
 
+                tiers.append(
+                    ServiceTier(
+                        id=str(tier_doc["_id"]),
+                        name=tier_doc["name"],
+                        description=tier_doc["description"],
+                        price=tier_doc["price"],
+                        category_id=tier_doc["category_id"],
+                        image=tier_doc.get("image"),
+                        features=tier_doc.get("features", []),
+                        is_popular=tier_doc.get("is_popular", False),
+                        is_available=tier_doc.get("is_available", True),
+                        created_at=tier_doc["created_at"],
+                        updated_at=tier_doc["updated_at"],
+                        services=tier_service_objects
+                    )
+                )
+        else:
+            # Get individual services for this category
+            service_docs = list(db.services.find({"category_id": str(category["_id"]), "tier_id": None}))
+            for service in service_docs:
+                services.append(
+                    Service(
+                        id=str(service["_id"]),
+                        name=service["name"],
+                        description=service["description"],
+                        image=service.get("image"),
+                        duration=service["duration"],
+                        isAvailable=service["isAvailable"],
+                        features=service.get("features", []),
+                        requirements=service.get("requirements", []),
+                        category_id=service.get("category_id"),
+                        tier_id=service.get("tier_id"),
+                        createdAt=service["createdAt"],
+                        updatedAt=service["updatedAt"]
+                    )
+                )
 
-@app.put("/users/{user_id}", response_model=User)
-async def update_user(
-        user_id: str,
-        user_update: UserUpdate,
-        current_user: UserInDB = Depends(get_current_active_user)
-):
-    # Only the user themselves or an admin can update a user
-    if str(current_user.id) != user_id and current_user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not enough permissions",
-        )
-
-    # Check if user exists
-    user = get_user_by_id(user_id)
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found",
-        )
-
-    # Update user
-    update_data = user_update.dict(exclude_unset=True)
-    if update_data:
-        update_data["updatedAt"] = datetime.utcnow()
-        result = db.users.update_one(
-            {"_id": ObjectId(user_id)},
-            {"$set": update_data}
-        )
-
-        if result.modified_count == 0:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="User update failed",
+        result.append(
+            ServiceCategory(
+                id=str(category["_id"]),
+                name=category["name"],
+                description=category["description"],
+                category_type=category["category_type"],
+                image=category.get("image"),
+                is_active=category["is_active"],
+                created_at=category["created_at"],
+                updated_at=category["updated_at"],
+                tiers=tiers,
+                services=services
             )
+        )
 
-    # Get updated user
-    updated_user = get_user_by_id(user_id)
-
-    return User(
-        id=str(updated_user.id),
-        email=updated_user.email,
-        firstName=updated_user.firstName,
-        lastName=updated_user.lastName,
-        phone=updated_user.phone,
-        address=updated_user.address,
-        profileImage=updated_user.profileImage,
-        role=updated_user.role,
-        createdAt=updated_user.createdAt,
-        updatedAt=updated_user.updatedAt
-    )
+    return result
 
 
-@app.delete("/users/{user_id}")
-async def delete_user(
-        user_id: str,
-        current_user: UserInDB = Depends(get_admin_user)
-):
+@app.get("/service-categories/{category_id}", response_model=ServiceCategory)
+async def get_service_category(category_id: str):
+    """Get a specific service category with its tiers/services"""
     try:
-        user = db.users.find_one({"_id": ObjectId(user_id)})
-        if not user:
+        category = db.service_categories.find_one({"_id": ObjectId(category_id)})
+        if not category:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="User not found",
+                detail="Service category not found"
             )
 
-        bookings = db.bookings.find_one({"userId": user_id})
+        tiers = []
+        services = []
+
+        if category["category_type"] == ServiceCategoryType.TIERED:
+            # Get tiers for this category
+            tier_docs = list(db.service_tiers.find({"category_id": category_id}))
+            for tier_doc in tier_docs:
+                # Get services for this tier
+                tier_services = list(db.services.find({"tier_id": str(tier_doc["_id"])}))
+                tier_service_objects = []
+
+                for service in tier_services:
+                    tier_service_objects.append(
+                        Service(
+                            id=str(service["_id"]),
+                            name=service["name"],
+                            description=service["description"],
+                            image=service.get("image"),
+                            duration=service["duration"],
+                            isAvailable=service["isAvailable"],
+                            features=service.get("features", []),
+                            requirements=service.get("requirements", []),
+                            category_id=service.get("category_id"),
+                            tier_id=service.get("tier_id"),
+                            createdAt=service["createdAt"],
+                            updatedAt=service["updatedAt"]
+                        )
+                    )
+
+                tiers.append(
+                    ServiceTier(
+                        id=str(tier_doc["_id"]),
+                        name=tier_doc["name"],
+                        description=tier_doc["description"],
+                        price=tier_doc["price"],
+                        category_id=tier_doc["category_id"],
+                        image=tier_doc.get("image"),
+                        features=tier_doc.get("features", []),
+                        is_popular=tier_doc.get("is_popular", False),
+                        is_available=tier_doc.get("is_available", True),
+                        created_at=tier_doc["created_at"],
+                        updated_at=tier_doc["updated_at"],
+                        services=tier_service_objects
+                    )
+                )
+        else:
+            # Get individual services for this category
+            service_docs = list(db.services.find({"category_id": category_id, "tier_id": None}))
+            for service in service_docs:
+                services.append(
+                    Service(
+                        id=str(service["_id"]),
+                        name=service["name"],
+                        description=service["description"],
+                        image=service.get("image"),
+                        duration=service["duration"],
+                        isAvailable=service["isAvailable"],
+                        features=service.get("features", []),
+                        requirements=service.get("requirements", []),
+                        category_id=service.get("category_id"),
+                        tier_id=service.get("tier_id"),
+                        createdAt=service["createdAt"],
+                        updatedAt=service["updatedAt"]
+                    )
+                )
+
+        return ServiceCategory(
+            id=str(category["_id"]),
+            name=category["name"],
+            description=category["description"],
+            category_type=category["category_type"],
+            image=category.get("image"),
+            is_active=category["is_active"],
+            created_at=category["created_at"],
+            updated_at=category["updated_at"],
+            tiers=tiers,
+            services=services
+        )
+    except Exception as e:
+        logger.error(f"Error getting service category: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Service category not found"
+        )
+
+
+@app.post("/service-categories", response_model=ServiceCategory)
+async def create_service_category(
+        category: ServiceCategoryCreate,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    """Create a new service category"""
+    if not category.name.strip() or not category.description.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Name and description are required"
+        )
+
+    category_in_db = ServiceCategoryInDB(**category.dict())
+    category_dict = category_in_db.dict(by_alias=True)
+    if category_dict.get("_id") is None:
+        del category_dict["_id"]
+
+    result = db.service_categories.insert_one(category_dict)
+    created_category = db.service_categories.find_one({"_id": result.inserted_id})
+
+    return ServiceCategory(
+        id=str(created_category["_id"]),
+        name=created_category["name"],
+        description=created_category["description"],
+        category_type=created_category["category_type"],
+        image=created_category.get("image"),
+        is_active=created_category["is_active"],
+        created_at=created_category["created_at"],
+        updated_at=created_category["updated_at"],
+        tiers=[],
+        services=[]
+    )
+
+
+@app.put("/service-categories/{category_id}", response_model=ServiceCategory)
+async def update_service_category(
+        category_id: str,
+        category_update: ServiceCategoryUpdate,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    """Update a service category"""
+    try:
+        category = db.service_categories.find_one({"_id": ObjectId(category_id)})
+        if not category:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Service category not found"
+            )
+
+        update_data = category_update.dict(exclude_unset=True)
+
+        if update_data:
+            if "name" in update_data and not update_data["name"].strip():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Name cannot be empty"
+                )
+            if "description" in update_data and not update_data["description"].strip():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Description cannot be empty"
+                )
+
+            update_data["updated_at"] = datetime.utcnow()
+            result = db.service_categories.update_one(
+                {"_id": ObjectId(category_id)},
+                {"$set": update_data}
+            )
+
+            if result.modified_count == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Service category update failed"
+                )
+
+        updated_category = db.service_categories.find_one({"_id": ObjectId(category_id)})
+
+        return ServiceCategory(
+            id=str(updated_category["_id"]),
+            name=updated_category["name"],
+            description=updated_category["description"],
+            category_type=updated_category["category_type"],
+            image=updated_category.get("image"),
+            is_active=updated_category["is_active"],
+            created_at=updated_category["created_at"],
+            updated_at=updated_category["updated_at"],
+            tiers=[],
+            services=[]
+        )
+    except Exception as e:
+        logger.error(f"Error updating service category: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Service category update failed"
+        )
+
+
+@app.delete("/service-categories/{category_id}")
+async def delete_service_category(
+        category_id: str,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    """Delete a service category and its associated tiers/services"""
+    try:
+        category = db.service_categories.find_one({"_id": ObjectId(category_id)})
+        if not category:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Service category not found"
+            )
+
+        # Check for existing bookings
+        bookings = db.bookings.find_one({
+            "$or": [
+                {"serviceId": {"$in": [str(s["_id"]) for s in db.services.find({"category_id": category_id})]}},
+                {"tierId": {"$in": [str(t["_id"]) for t in db.service_tiers.find({"category_id": category_id})]}}
+            ]
+        })
         if bookings:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Cannot delete user with existing bookings",
+                detail="Cannot delete category with existing bookings"
             )
 
-        subscriptions = db.subscriptions.find_one({"userId": user_id})
-        if subscriptions:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Cannot delete user with existing subscriptions",
-            )
+        # Delete associated services and tiers
+        db.services.delete_many({"category_id": category_id})
+        db.service_tiers.delete_many({"category_id": category_id})
 
-        result = db.users.delete_one({"_id": ObjectId(user_id)})
+        result = db.service_categories.delete_one({"_id": ObjectId(category_id)})
+
         if result.deleted_count == 0:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="User deletion failed",
+                detail="Service category deletion failed"
             )
 
-        return {"message": "User deleted successfully"}
+        return {"message": "Service category and associated data deleted successfully"}
     except Exception as e:
-        logger.error(f"Error deleting user: {e}")
+        logger.error(f"Error deleting service category: {e}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="User deletion failed",
+            detail="Service category deletion failed"
         )
 
 
-@app.post("/users/profile-image")
-async def upload_profile_image(
+@app.post("/service-categories/image")
+async def upload_service_category_image(
         file: UploadFile = File(...),
-        current_user: UserInDB = Depends(get_current_user)
+        current_user: UserInDB = Depends(get_admin_user)
 ):
+    """Upload service category image"""
     if not file.content_type.startswith("image/"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="File must be an image"
         )
 
-    image_url = upload_file_to_cloudinary(file, folder="naija_concierge/profiles")
-
-    result = db.users.update_one(
-        {"_id": ObjectId(current_user.id)},
-        {"$set": {"profileImage": image_url, "updatedAt": datetime.utcnow()}}
-    )
-
-    if result.modified_count == 0:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Failed to update profile image",
-        )
-
-    return {"profileImage": image_url}
+    image_url = upload_file_to_cloudinary(file, folder="naija_concierge/categories")
+    return {"imageUrl": image_url}
 
 
-# Gallery
-
-# Add these endpoints to your existing FastAPI app
-@app.get("/gallery", response_model=List[GalleryImage])
-async def get_gallery(
+# Service Tier routes (for tiered categories)
+@app.get("/service-tiers", response_model=List[ServiceTier])
+async def get_service_tiers(
         skip: int = 0,
         limit: int = 100,
-        category: Optional[str] = None,
-        tag: Optional[str] = None,
-        # current_user: UserInDB = Depends(get_current_active_user)
+        category_id: Optional[str] = None
 ):
-    """
-    Get all gallery images with optional filtering by category or tag.
-    """
+    """Get service tiers with their services"""
     query = {}
+    if category_id:
+        query["category_id"] = category_id
 
-    if category:
-        query["category"] = category
-    if tag:
-        query["tags"] = {"$in": [tag]}
+    tiers = list(db.service_tiers.find(query).skip(skip).limit(limit))
+    result = []
 
-    try:
-        gallery_images = list(db.gallery.find(query).skip(skip).limit(limit))
-        return [
-            GalleryImage(
-                id=str(img["_id"]),
-                title=img["title"],
-                description=img.get("description"),
-                category=img["category"],
-                tags=img.get("tags", []),
-                image_url=img["image_url"],
-                created_by=img["created_by"],
-                created_at=img["created_at"],
-                updated_at=img["updated_at"]
-            ) for img in gallery_images
-        ]
-    except Exception as e:
-        logger.error(f"Error fetching gallery images: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to fetch gallery images"
-        )
+    for tier in tiers:
+        # Get services for this tier
+        services = list(db.services.find({"tier_id": str(tier["_id"])}))
+        service_objects = []
 
-
-@app.post("/gallery", response_model=GalleryImage)
-async def create_gallery_image(
-        title: str = Form(...),
-        description: Optional[str] = Form(None),
-        category: str = Form(...),
-        tags: str = Form(""),  # Comma-separated string
-        file: UploadFile = File(...),
-        current_user: UserInDB = Depends(get_current_active_user)
-):
-    """
-    Upload a new image to the gallery.
-    """
-    if not file.content_type.startswith("image/"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="File must be an image"
-        )
-
-    if not title.strip() or not category.strip():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Title and category are required"
-        )
-
-    try:
-        # Upload image to Cloudinary
-        image_url = upload_file_to_cloudinary(file, folder="naija_concierge/gallery")
-
-        # Process tags
-        tag_list = [t.strip() for t in tags.split(",") if t.strip()]
-
-        gallery_image = GalleryImageInDB(
-            title=title,
-            description=description,
-            category=category,
-            tags=tag_list,
-            image_url=image_url,
-            created_by=str(current_user.id))
-
-        result = db.gallery.insert_one(gallery_image.dict(by_alias=True))
-        created_image = db.gallery.find_one({"_id": result.inserted_id})
-
-        return GalleryImage(
-            id=str(created_image["_id"]),
-            title=created_image["title"],
-            description=created_image.get("description"),
-            category=created_image["category"],
-            tags=created_image.get("tags", []),
-            image_url=created_image["image_url"],
-            created_by=created_image["created_by"],
-            created_at=created_image["created_at"],
-            updated_at=created_image["updated_at"]
-        )
-    except Exception as e:
-        logger.error(f"Error creating gallery image: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to create gallery image"
-        )
-
-
-@app.get("/gallery/{image_id}", response_model=GalleryImage)
-async def get_gallery_image(
-        image_id: str,
-        # current_user: UserInDB = Depends(get_current_active_user)
-):
-    """
-    Get a specific gallery image by ID.
-    """
-    try:
-        image = db.gallery.find_one({"_id": ObjectId(image_id)})
-        if not image:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Gallery image not found"
+        for service in services:
+            service_objects.append(
+                Service(
+                    id=str(service["_id"]),
+                    name=service["name"],
+                    description=service["description"],
+                    image=service.get("image"),
+                    duration=service["duration"],
+                    isAvailable=service["isAvailable"],
+                    features=service.get("features", []),
+                    requirements=service.get("requirements", []),
+                    category_id=service.get("category_id"),
+                    tier_id=service.get("tier_id"),
+                    createdAt=service["createdAt"],
+                    updatedAt=service["updatedAt"]
+                )
             )
 
-        return GalleryImage(
-            id=str(image["_id"]),
-            title=image["title"],
-            description=image.get("description"),
-            category=image["category"],
-            tags=image.get("tags", []),
-            image_url=image["image_url"],
-            created_by=image["created_by"],
-            created_at=image["created_at"],
-            updated_at=image["updated_at"]
-        )
-    except Exception as e:
-        logger.error(f"Error fetching gallery image: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to fetch gallery image"
-        )
-
-
-@app.put("/gallery/{image_id}", response_model=GalleryImage)
-async def update_gallery_image(
-        image_id: str,
-        image_update: GalleryImageUpdate,
-        current_user: UserInDB = Depends(get_current_active_user)
-):
-    """
-    Update a gallery image's metadata (title, description, category, tags).
-    """
-    try:
-        image = db.gallery.find_one({"_id": ObjectId(image_id)})
-        if not image:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Gallery image not found"
-            )
-
-        # Check if user is admin or the creator of the image
-        if current_user.role != "admin" and image["created_by"] != str(current_user.id):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Not enough permissions to update this image"
-            )
-
-        update_data = image_update.dict(exclude_unset=True)
-        if update_data:
-            update_data["updated_at"] = datetime.utcnow()
-            result = db.gallery.update_one(
-                {"_id": ObjectId(image_id)},
-                {"$set": update_data}
-            )
-
-            if result.modified_count == 0:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Gallery image update failed"
+        # Get category info
+        category_obj = None
+        if tier.get("category_id"):
+            category = db.service_categories.find_one({"_id": ObjectId(tier["category_id"])})
+            if category:
+                category_obj = ServiceCategory(
+                    id=str(category["_id"]),
+                    name=category["name"],
+                    description=category["description"],
+                    category_type=category["category_type"],
+                    image=category.get("image"),
+                    is_active=category["is_active"],
+                    created_at=category["created_at"],
+                    updated_at=category["updated_at"],
+                    tiers=[],
+                    services=[]
                 )
 
-        updated_image = db.gallery.find_one({"_id": ObjectId(image_id)})
-
-        return GalleryImage(
-            id=str(updated_image["_id"]),
-            title=updated_image["title"],
-            description=updated_image.get("description"),
-            category=updated_image["category"],
-            tags=updated_image.get("tags", []),
-            image_url=updated_image["image_url"],
-            created_by=updated_image["created_by"],
-            created_at=updated_image["created_at"],
-            updated_at=updated_image["updated_at"]
-        )
-    except Exception as e:
-        logger.error(f"Error updating gallery image: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to update gallery image"
+        result.append(
+            ServiceTier(
+                id=str(tier["_id"]),
+                name=tier["name"],
+                description=tier["description"],
+                price=tier["price"],
+                category_id=tier["category_id"],
+                image=tier.get("image"),
+                features=tier.get("features", []),
+                is_popular=tier.get("is_popular", False),
+                is_available=tier.get("is_available", True),
+                created_at=tier["created_at"],
+                updated_at=tier["updated_at"],
+                services=service_objects,
+                category=category_obj
+            )
         )
 
+    return result
 
-@app.delete("/gallery/{image_id}")
-async def delete_gallery_image(
-        image_id: str,
-        current_user: UserInDB = Depends(get_current_active_user)
-):
-    """
-    Delete a gallery image.
-    """
+
+@app.get("/service-tiers/{tier_id}", response_model=ServiceTier)
+async def get_service_tier(tier_id: str):
+    """Get a specific service tier with its services"""
     try:
-        image = db.gallery.find_one({"_id": ObjectId(image_id)})
-        if not image:
+        tier = db.service_tiers.find_one({"_id": ObjectId(tier_id)})
+        if not tier:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Gallery image not found"
+                detail="Service tier not found"
             )
 
-        # Check if user is admin or the creator of the image
-        if current_user.role != "admin" and image["created_by"] != str(current_user.id):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Not enough permissions to delete this image"
+        # Get services for this tier
+        services = list(db.services.find({"tier_id": tier_id}))
+        service_objects = []
+
+        for service in services:
+            service_objects.append(
+                Service(
+                    id=str(service["_id"]),
+                    name=service["name"],
+                    description=service["description"],
+                    image=service.get("image"),
+                    duration=service["duration"],
+                    isAvailable=service["isAvailable"],
+                    features=service.get("features", []),
+                    requirements=service.get("requirements", []),
+                    category_id=service.get("category_id"),
+                    tier_id=service.get("tier_id"),
+                    createdAt=service["createdAt"],
+                    updatedAt=service["updatedAt"]
+                )
             )
 
-        # Extract public_id from the URL (alternative solution)
-        if "image_url" in image:
+        # Get category info
+        category_obj = None
+        if tier.get("category_id"):
+            category = db.service_categories.find_one({"_id": ObjectId(tier["category_id"])})
+            if category:
+                category_obj = ServiceCategory(
+                    id=str(category["_id"]),
+                    name=category["name"],
+                    description=category["description"],
+                    category_type=category["category_type"],
+                    image=category.get("image"),
+                    is_active=category["is_active"],
+                    created_at=category["created_at"],
+                    updated_at=category["updated_at"],
+                    tiers=[],
+                    services=[]
+                )
 
-            url_parts = image["image_url"].split('/')
-            public_id_with_extension = '/'.join(url_parts[url_parts.index('upload') + 2:])
-            public_id = public_id_with_extension.split('.')[0]  # Remove file extension
-
-
-            cloudinary.uploader.destroy(public_id)
-
-        result = db.gallery.delete_one({"_id": ObjectId(image_id)})
-
-        if result.deleted_count == 0:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Gallery image deletion failed"
-            )
-
-        return {"message": "Gallery image deleted successfully"}
-    except Exception as e:
-        logger.error(f"Error deleting gallery image: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to delete gallery image"
-        )
-
-
-@app.post("/gallery/{image_id}/image")
-async def update_gallery_image_file(
-        image_id: str,
-        file: UploadFile = File(...),
-        current_user: UserInDB = Depends(get_current_active_user)
-):
-    """
-    Update the image file for a gallery item.
-    """
-    if not file.content_type.startswith("image/"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="File must be an image"
-        )
-
-    try:
-        image = db.gallery.find_one({"_id": ObjectId(image_id)})
-        if not image:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Gallery image not found"
-            )
-
-        # Check if user is admin or the creator of the image
-        if current_user.role != "admin" and image["created_by"] != str(current_user.id):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Not enough permissions to update this image"
-            )
-
-        # Upload new image to Cloudinary
-        new_image_url = upload_file_to_cloudinary(file, folder="naija_concierge/gallery")
-
-        # Update the image URL in the database
-        result = db.gallery.update_one(
-            {"_id": ObjectId(image_id)},
-            {"$set": {
-                "image_url": new_image_url,
-                "updated_at": datetime.utcnow()
-            }}
-        )
-
-        if result.modified_count == 0:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Failed to update gallery image"
-            )
-
-        return {"image_url": new_image_url}
-    except Exception as e:
-        logger.error(f"Error updating gallery image file: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to update gallery image file"
-        )
-
-
-# crm
-
-@app.get("/crm/clients", response_model=List[CRMClient])
-async def get_crm_clients(
-        skip: int = 0,
-        limit: int = 100,
-        status: Optional[str] = None,
-        current_user: UserInDB = Depends(get_admin_user)
-):
-    query = {}
-    if status:
-        query["status"] = status
-
-    clients = list(db.crm_clients.find(query).skip(skip).limit(limit))
-    return [
-        CRMClient(
-            id=str(client["_id"]),
-            clientName=client["clientName"],
-            contactInfo=client["contactInfo"],
-            serviceBooked=client["serviceBooked"],
-            status=client["status"],
-            assignedVendor=client.get("assignedVendor"),
-            notes=client.get("notes"),
-            dueDate=client.get("dueDate"),
-            createdAt=client["createdAt"],
-            updatedAt=client["updatedAt"]
-        ) for client in clients
-    ]
-
-
-@app.post("/crm/clients", response_model=CRMClient)
-async def create_crm_client(
-        client: CRMClientCreate,
-        current_user: UserInDB = Depends(get_admin_user)
-):
-    if not client.clientName.strip():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Client name is required"
-        )
-    if not client.contactInfo.get("email") and not client.contactInfo.get("phone"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="At least one contact method (email or phone) is required"
-        )
-
-    try:
-        service = db.services.find_one({"_id": ObjectId(client.serviceBooked)})
-        if not service:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Service not found"
-            )
-    except Exception as e:
-        logger.error(f"Invalid service ID: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid service ID"
-        )
-
-    client_in_db = CRMClientInDB(**client.dict())
-    result = db.crm_clients.insert_one(client_in_db.dict(by_alias=True))
-
-    created_client = db.crm_clients.find_one({"_id": result.inserted_id})
-
-    return CRMClient(
-        id=str(created_client["_id"]),
-        clientName=created_client["clientName"],
-        contactInfo=created_client["contactInfo"],
-        serviceBooked=created_client["serviceBooked"],
-        status=created_client["status"],
-        assignedVendor=created_client.get("assignedVendor"),
-        notes=created_client.get("notes"),
-        dueDate=created_client.get("dueDate"),
-        createdAt=created_client["createdAt"],
-        updatedAt=created_client["updatedAt"]
-    )
-
-
-@app.get("/crm/clients/{client_id}", response_model=CRMClient)
-async def get_crm_client(
-        client_id: str,
-        current_user: UserInDB = Depends(get_admin_user)
-):
-    try:
-        client = db.crm_clients.find_one({"_id": ObjectId(client_id)})
-        if not client:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Client not found",
-            )
-
-        return CRMClient(
-            id=str(client["_id"]),
-            clientName=client["clientName"],
-            contactInfo=client["contactInfo"],
-            serviceBooked=client["serviceBooked"],
-            status=client["status"],
-            assignedVendor=client.get("assignedVendor"),
-            notes=client.get("notes"),
-            dueDate=client.get("dueDate"),
-            createdAt=client["createdAt"],
-            updatedAt=client["updatedAt"]
+        return ServiceTier(
+            id=str(tier["_id"]),
+            name=tier["name"],
+            description=tier["description"],
+            price=tier["price"],
+            category_id=tier["category_id"],
+            image=tier.get("image"),
+            features=tier.get("features", []),
+            is_popular=tier.get("is_popular", False),
+            is_available=tier.get("is_available", True),
+            created_at=tier["created_at"],
+            updated_at=tier["updated_at"],
+            services=service_objects,
+            category=category_obj
         )
     except Exception as e:
-        logger.error(f"Error getting CRM client: {e}")
+        logger.error(f"Error getting service tier: {e}")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Client not found",
+            detail="Service tier not found"
         )
 
-@app.put("/crm/clients/{client_id}", response_model=CRMClient)
-async def update_crm_client(
-        client_id: str,
-        client_update: CRMClientUpdate,
+
+@app.post("/service-tiers", response_model=ServiceTier)
+async def create_service_tier(
+        tier: ServiceTierCreate,
         current_user: UserInDB = Depends(get_admin_user)
 ):
+    """Create a new service tier"""
+    if not tier.name.strip() or not tier.description.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Name and description are required"
+        )
+
+    if tier.price < 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Price cannot be negative"
+        )
+
+    # Validate category exists and is tiered
+    category = db.service_categories.find_one({"_id": ObjectId(tier.category_id)})
+    if not category:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Service category not found"
+        )
+
+    if category["category_type"] != ServiceCategoryType.TIERED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Can only create tiers for tiered categories"
+        )
+
+    tier_in_db = ServiceTierInDB(**tier.dict())
+    tier_dict = tier_in_db.dict(by_alias=True)
+    if tier_dict.get("_id") is None:
+        del tier_dict["_id"]
+
+    result = db.service_tiers.insert_one(tier_dict)
+    created_tier = db.service_tiers.find_one({"_id": result.inserted_id})
+
+    return ServiceTier(
+        id=str(created_tier["_id"]),
+        name=created_tier["name"],
+        description=created_tier["description"],
+        price=created_tier["price"],
+        category_id=created_tier["category_id"],
+        image=created_tier.get("image"),
+        features=created_tier.get("features", []),
+        is_popular=created_tier.get("is_popular", False),
+        is_available=created_tier.get("is_available", True),
+        created_at=created_tier["created_at"],
+        updated_at=created_tier["updated_at"],
+        services=[]
+    )
+
+
+@app.put("/service-tiers/{tier_id}", response_model=ServiceTier)
+async def update_service_tier(
+        tier_id: str,
+        tier_update: ServiceTierUpdate,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    """Update a service tier"""
     try:
-        client = db.crm_clients.find_one({"_id": ObjectId(client_id)})
-        if not client:
+        tier = db.service_tiers.find_one({"_id": ObjectId(tier_id)})
+        if not tier:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Client not found",
+                detail="Service tier not found"
             )
 
-        update_data = client_update.dict(exclude_unset=True)
+        update_data = tier_update.dict(exclude_unset=True)
+
         if update_data:
-            if "clientName" in update_data and not update_data["clientName"].strip():
+            if "name" in update_data and not update_data["name"].strip():
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Client name cannot be empty"
+                    detail="Name cannot be empty"
                 )
-            if "serviceBooked" in update_data:
-                service = db.services.find_one({"_id": ObjectId(update_data["serviceBooked"])})
-                if not service:
-                    raise HTTPException(
-                        status_code=status.HTTP_404_NOT_FOUND,
-                        detail="Service not found"
-                    )
-            if "contactInfo" in update_data and not (update_data["contactInfo"].get("email") or update_data["contactInfo"].get("phone")):
+            if "description" in update_data and not update_data["description"].strip():
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="At least one contact method (email or phone) is required"
+                    detail="Description cannot be empty"
                 )
-            update_data["updatedAt"] = datetime.utcnow()
-            result = db.crm_clients.update_one(
-                {"_id": ObjectId(client_id)},
+            if "price" in update_data and update_data["price"] < 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Price cannot be negative"
+                )
+
+            update_data["updated_at"] = datetime.utcnow()
+            result = db.service_tiers.update_one(
+                {"_id": ObjectId(tier_id)},
                 {"$set": update_data}
             )
 
             if result.modified_count == 0:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Client update failed",
+                    detail="Service tier update failed"
                 )
 
+        updated_tier = db.service_tiers.find_one({"_id": ObjectId(tier_id)})
 
-        updated_client = db.crm_clients.find_one({"_id": ObjectId(client_id)})
+        # Get services for this tier
+        services = list(db.services.find({"tier_id": tier_id}))
+        service_objects = []
 
-        return CRMClient(
-            id=str(updated_client["_id"]),
-            clientName=updated_client["clientName"],
-            contactInfo=updated_client["contactInfo"],
-            serviceBooked=updated_client["serviceBooked"],
-            status=updated_client["status"],
-            assignedVendor=updated_client.get("assignedVendor"),
-            notes=updated_client.get("notes"),
-            dueDate=updated_client.get("dueDate"),
-            createdAt=updated_client["createdAt"],
-            updatedAt=updated_client["updatedAt"]
+        for service in services:
+            service_objects.append(
+                Service(
+                    id=str(service["_id"]),
+                    name=service["name"],
+                    description=service["description"],
+                    image=service.get("image"),
+                    duration=service["duration"],
+                    isAvailable=service["isAvailable"],
+                    features=service.get("features", []),
+                    requirements=service.get("requirements", []),
+                    category_id=service.get("category_id"),
+                    tier_id=service.get("tier_id"),
+                    createdAt=service["createdAt"],
+                    updatedAt=service["updatedAt"]
+                )
+            )
+
+        return ServiceTier(
+            id=str(updated_tier["_id"]),
+            name=updated_tier["name"],
+            description=updated_tier["description"],
+            price=updated_tier["price"],
+            category_id=updated_tier["category_id"],
+            image=updated_tier.get("image"),
+            features=updated_tier.get("features", []),
+            is_popular=updated_tier.get("is_popular", False),
+            is_available=updated_tier.get("is_available", True),
+            created_at=updated_tier["created_at"],
+            updated_at=updated_tier["updated_at"],
+            services=service_objects
         )
     except Exception as e:
-            logger.error(f"Error updating CRM client: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Client update failed",
-            )
+        logger.error(f"Error updating service tier: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Service tier update failed"
+        )
 
-@app.delete("/crm/clients/{client_id}")
-async def delete_crm_client(
-        client_id: str,
+
+@app.delete("/service-tiers/{tier_id}")
+async def delete_service_tier(
+        tier_id: str,
         current_user: UserInDB = Depends(get_admin_user)
 ):
+    """Delete a service tier and its associated services"""
     try:
-        client = db.crm_clients.find_one({"_id": ObjectId(client_id)})
-        if not client:
+        tier = db.service_tiers.find_one({"_id": ObjectId(tier_id)})
+        if not tier:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Client not found",
+                detail="Service tier not found"
             )
 
-        result = db.crm_clients.delete_one({"_id": ObjectId(client_id)})
+        # Check for existing bookings
+        bookings = db.bookings.find_one({"tierId": tier_id})
+        if bookings:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot delete tier with existing bookings"
+            )
+
+        # Delete associated services
+        db.services.delete_many({"tier_id": tier_id})
+
+        result = db.service_tiers.delete_one({"_id": ObjectId(tier_id)})
 
         if result.deleted_count == 0:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Client deletion failed",
+                detail="Service tier deletion failed"
             )
 
-        return {"message": "Client deleted successfully"}
+        return {"message": "Service tier and associated services deleted successfully"}
     except Exception as e:
-        logger.error(f"Error deleting CRM client: {e}")
+        logger.error(f"Error deleting service tier: {e}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Client deletion failed",
+            detail="Service tier deletion failed"
         )
 
 
-# Airtable
-# @app.post("/bookings/airtable", response_model=Booking)
-# async def create_airtable_booking(
-#         booking_form: AirtableBookingForm
-# ):
-#     try:
-#         if not booking_form.clientName.strip():
-#             raise HTTPException(
-#                 status_code=status.HTTP_400_BAD_REQUEST,
-#                 detail="Client name is required"
-#             )
-#
-#         service = db.services.find_one({"_id": ObjectId(booking_form.serviceId)})
-#         if not service:
-#             raise HTTPException(
-#                 status_code=status.HTTP_404_NOT_FOUND,
-#                 detail="Service not found",
-#             )
-#
-#         if not service["isAvailable"]:
-#             raise HTTPException(
-#                 status_code=status.HTTP_400_BAD_REQUEST,
-#                 detail="Service is not available",
-#             )
-#
-#         user = db.users.find_one({"email": booking_form.email})
-#         if not user:
-#             user_dict = {
-#                 "email": booking_form.email,
-#                 "firstName": booking_form.clientName.split(" ")[0],
-#                 "lastName": " ".join(booking_form.clientName.split(" ")[1:]) if len(booking_form.clientName.split(" ")) > 1 else "",
-#                 "phone": booking_form.phone,
-#                 "role": "user",
-#                 "createdAt": datetime.utcnow(),
-#                 "updatedAt": datetime.utcnow(),
-#                 "hashed_password": get_password_hash(str(uuid.uuid4()))
-#             }
-#             user_result = db.users.insert_one(user_dict)
-#             user_id = str(user_result.inserted_id)
-#         else:
-#             user_id = str(user["_id"])
-#
-#         booking_data = BookingInDB(
-#             userId=user_id,
-#             serviceId=booking_form.serviceId,
-#             bookingDate=booking_form.bookingDate,
-#             status="pending",
-#             specialRequests=booking_form.specialRequests
-#         )
-#         result = db.bookings.insert_one(booking_data.dict(by_alias=True))
-#
-#         created_booking = db.bookings.find_one({"_id": result.inserted_id})
-#
-#         airtable_data = {
-#             "Client Name": booking_form.clientName,
-#             "Email": booking_form.email,
-#             "Phone": booking_form.phone or "",
-#             "Service": service["name"],
-#             "Booking Date": booking_form.bookingDate.isoformat(),
-#             "Special Requests": booking_form.specialRequests or "",
-#             "Status": "Pending",
-#             "Booking ID": str(created_booking["_id"])
-#         }
-#         add_to_airtable(airtable_data)
-#
-#         crm_client = CRMClientInDB(
-#             clientName=booking_form.clientName,
-#             contactInfo={"email": booking_form.email, "phone": booking_form.phone or ""},
-#             serviceBooked=booking_form.serviceId,
-#             status="pending"
-#         )
-#         db.crm_clients.insert_one(crm_client.dict(by_alias=True))
-#
-#         notification_message = f"""
-#         New booking received:
-#         - Client: {booking_form.clientName}
-#         - Service: {service["name"]}
-#         - Date: {booking_form.bookingDate.strftime("%Y-%m-%d %H:%M")}
-#         - Email: {booking_form.email}
-#         """
-#         send_admin_notification("New Booking Received", notification_message)
-#
-#         confirmation_html = f"""
-#         <html>
-#             <body>
-#                 <h1>Booking Confirmation</h1>
-#                 <p>Dear {booking_form.clientName},</p>
-#                 <p>Your booking for {service["name"]} has been received and is currently pending.</p>
-#                 <p>Booking Details:</p>
-#                 <ul>
-#                     <li>Service: {service["name"]}</li>
-#                     <li>Date: {booking_form.bookingDate.strftime("%Y-%m-%d %H:%M")}</li>
-#                     <li>Status: Pending</li>
-#                     <li>Price: ₦{service["price"]}</li>
-#                 </ul>
-#                 <p>We will contact you shortly to confirm your booking.</p>
-#                 <p>Best regards,<br>The Naija Concierge Team</p>
-#             </body>
-#         </html>
-#         """
-#         send_email(booking_form.email, "Booking Confirmation - Naija Concierge", confirmation_html)
-#
-#         service_obj = Service(
-#             id=str(service["_id"]),
-#             name=service["name"],
-#             description=service["description"],
-#             category=service["category"],
-#             price=service["price"],
-#             image=service.get("image"),
-#             duration=service["duration"],
-#             isAvailable=service["isAvailable"],
-#             createdAt=service["createdAt"],
-#             updatedAt=service["updatedAt"]
-#         )
-#
-#         return Booking(
-#             id=str(created_booking["_id"]),
-#             userId=created_booking["userId"],
-#             serviceId=created_booking["serviceId"],
-#             bookingDate=created_booking["bookingDate"],
-#             status=created_booking["status"],
-#             specialRequests=created_booking.get("specialRequests"),
-#             createdAt=created_booking["createdAt"],
-#             updatedAt=created_booking["updatedAt"],
-#             service=service_obj
-#         )
-#     except Exception as e:
-#         logger.error(f"Error creating Airtable booking: {e}")
-#         raise HTTPException(
-#             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-#             detail="Failed to create booking"
-#         )
-
-
-@app.post("/bookings/airtable", response_model=Booking)
-async def create_airtable_booking(
-    booking_form: AirtableBookingForm,
-    current_user: UserInDB = Depends(get_current_active_user)
+@app.post("/service-tiers/image")
+async def upload_service_tier_image(
+        file: UploadFile = File(...),
+        current_user: UserInDB = Depends(get_admin_user)
 ):
-    print(current_user)
-    try:
-        # Validate client name (not just "string" or empty)
-        if not booking_form.clientName.strip() or booking_form.clientName.lower() == "string":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Client name must be a valid name, not 'string' or empty"
-            )
-
-        # Validate phone (basic format check)
-        # if booking_form.phone and not re.match(r"^\+?\d{10,15}$", booking_form.phone):
-        #     raise HTTPException(
-        #         status_code=status.HTTP_400_BAD_REQUEST,
-        #         detail="Phone number must be a valid number (10-15 digits, optional leading +)"
-        #     )
-
-        # Validate service
-        service = db.services.find_one({"_id": ObjectId(booking_form.serviceId)})
-        if not service:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Service not found"
-            )
-
-        if not service["isAvailable"]:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Service is not available"
-            )
-
-        # Validate service price
-        # if not isinstance(service.get("price"), (int, float)) or service["price"] <= 0:
-        #     raise HTTPException(
-        #         status_code=status.HTTP_400_BAD_REQUEST,
-        #         detail="Service price must be a positive number"
-        #     )
-        #
-        # # Validate service name
-        # if not service["name"] or service["name"].lower() == "string":
-        #     raise HTTPException(
-        #         status_code=status.HTTP_400_BAD_REQUEST,
-        #         detail="Service name is invalid"
-        #     )
-
-        # Use current user's email
-        booking_email = current_user.email
-
-        # Check if user exists, create if not
-        user = db.users.find_one({"email": booking_email})
-        if not user:
-            user_dict = {
-                "email": booking_email,
-                "firstName": booking_form.clientName.split(" ")[0],
-                "lastName": " ".join(booking_form.clientName.split(" ")[1:]) if len(booking_form.clientName.split(" ")) > 1 else "",
-                "phone": booking_form.phone,
-                "role": "user",
-                "createdAt": datetime.utcnow(),
-                "updatedAt": datetime.utcnow(),
-                "hashed_password": get_password_hash(str(uuid.uuid4()))
-            }
-            user_result = db.users.insert_one(user_dict)
-            user_id = str(user_result.inserted_id)
-        else:
-            user_id = str(user["_id"])
-
-        # Create booking in MongoDB
-        booking_data = BookingInDB(
-            userId=user_id,
-            serviceId=booking_form.serviceId,
-            bookingDate=booking_form.bookingDate,
-            status="pending",
-            specialRequests=booking_form.specialRequests
-        )
-        result = db.bookings.insert_one(booking_data.dict(by_alias=True))
-        created_booking = db.bookings.find_one({"_id": result.inserted_id})
-
-        # Prepare Airtable data (aligned with Airtable schema)
-        airtable_data = {
-            "Booking ID": str(created_booking["_id"]),  # Explicitly convert ObjectId to string
-            "Client Name": booking_form.clientName,
-            "Service Requested": service["name"],
-            "Booking Date": booking_form.bookingDate.strftime("%Y-%m-%d"),
-            "Booking Details": booking_form.specialRequests or "",
-            "Status": "Pending",
-            "Total Cost": float(service["price"]),  # Ensure number type
-            "Feedback": [],  # Optional linked field
-            "Subscription Plan": [],  # Optional linked field
-            "User": []  # Optional linked field
-        }
-        logger.info(f"Airtable data prepared: {airtable_data}")
-
-        # Add to Airtable
-        airtable_response = add_to_airtable(airtable_data)
-        logger.info(f"Airtable response: {airtable_response}")
-
-        # Create CRM client entry
-        crm_client = CRMClientInDB(
-            clientName=booking_form.clientName,
-            contactInfo={"email": booking_email, "phone": booking_form.phone or ""},
-            serviceBooked=booking_form.serviceId,
-            status="pending"
-        )
-        db.crm_clients.insert_one(crm_client.dict(by_alias=True))
-
-        # Get user for notification
-        user_obj = get_user_by_id(user_id)
-        if not user_obj:
-            logger.error(f"User not found after creation: {user_id}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="User creation failed"
-            )
-
-        # Send admin notification
-        notification_message = f"""
-        New booking received:
-        - Client: {booking_form.clientName}
-        - Service: {service["name"]}
-        - Date: {booking_form.bookingDate.strftime("%Y-%m-%d %H:%M")}
-        - Email: {booking_email}
-        """
-        send_admin_notification("New Booking Received", notification_message)
-
-        # Send confirmation email to user
-        confirmation_html = f"""
-        <html>
-            <body>
-                <h1>Booking Confirmation</h1>
-                <p>Dear {booking_form.clientName},</p>
-                <p>Your booking for {service["name"]} has been received and is currently pending.</p>
-                <p>Booking Details:</p>
-                <ul>
-                    <li>Service: {service["name"]}</li>
-                    <li>Date: {booking_form.bookingDate.strftime("%Y-%m-%d %H:%M")}</li>
-                    <li>Status: Pending</li>
-                    <li>Price: ₦{service["price"]}</li>
-                </ul>
-                <p>We will contact you shortly to confirm your booking.</p>
-                <p>Best regards,<br>The Naija Concierge Team</p>
-            </body>
-        </html>
-        """
-        send_email(booking_email, "Booking Confirmation - Naija Concierge", confirmation_html)
-
-        # Create service object for response
-        service_obj = Service(
-            id=str(service["_id"]),
-            name=service["name"],
-            description=service["description"],
-            category=service["category"],
-            price=service["price"],
-            image=service.get("image"),
-            duration=service["duration"],
-            isAvailable=service["isAvailable"],
-            createdAt=service["createdAt"],
-            updatedAt=service["updatedAt"]
-        )
-
-        # Return booking response
-        return Booking(
-            id=str(created_booking["_id"]),
-            userId=created_booking["userId"],
-            serviceId=created_booking["serviceId"],
-            bookingDate=created_booking["bookingDate"],
-            status=created_booking["status"],
-            specialRequests=created_booking.get("specialRequests"),
-            createdAt=created_booking["createdAt"],
-            updatedAt=created_booking["updatedAt"],
-            service=service_obj
-        )
-    except Exception as e:
-        logger.error(f"Error creating Airtable booking: {e}")
+    """Upload service tier image"""
+    if not file.content_type.startswith("image/"):
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to create booking: {str(e)}"
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File must be an image"
         )
+
+    image_url = upload_file_to_cloudinary(file, folder="naija_concierge/service_tiers")
+    return {"imageUrl": image_url}
+
+
 # Service routes
 @app.get("/services", response_model=List[Service])
 async def get_services(
         skip: int = 0,
         limit: int = 100,
-        category: Optional[str] = None
+        category_id: Optional[str] = None,
+        tier_id: Optional[str] = None
 ):
+    """Get services"""
     query = {}
-    if category:
-        query["category"] = category
+
+    if category_id:
+        query["category_id"] = category_id
+    if tier_id:
+        query["tier_id"] = tier_id
 
     services = list(db.services.find(query).skip(skip).limit(limit))
-    return [
-        Service(
-            id=str(service["_id"]),
-            name=service["name"],
-            description=service["description"],
-            category=service["category"],
-            price=service["price"],
-            image=service.get("image"),
-            duration=service["duration"],
-            isAvailable=service["isAvailable"],
-            createdAt=service["createdAt"],
-            updatedAt=service["updatedAt"]
-        ) for service in services
-    ]
+    result = []
+
+    for service in services:
+        # Get category info
+        category_obj = None
+        if service.get("category_id"):
+            category = db.service_categories.find_one({"_id": ObjectId(service["category_id"])})
+            if category:
+                category_obj = ServiceCategory(
+                    id=str(category["_id"]),
+                    name=category["name"],
+                    description=category["description"],
+                    category_type=category["category_type"],
+                    image=category.get("image"),
+                    is_active=category["is_active"],
+                    created_at=category["created_at"],
+                    updated_at=category["updated_at"],
+                    tiers=[],
+                    services=[]
+                )
+
+        # Get tier info
+        tier_obj = None
+        if service.get("tier_id"):
+            tier = db.service_tiers.find_one({"_id": ObjectId(service["tier_id"])})
+            if tier:
+                tier_obj = ServiceTier(
+                    id=str(tier["_id"]),
+                    name=tier["name"],
+                    description=tier["description"],
+                    price=tier["price"],
+                    category_id=tier["category_id"],
+                    image=tier.get("image"),
+                    features=tier.get("features", []),
+                    is_popular=tier.get("is_popular", False),
+                    is_available=tier.get("is_available", True),
+                    created_at=tier["created_at"],
+                    updated_at=tier["updated_at"],
+                    services=[]
+                )
+
+        result.append(
+            Service(
+                id=str(service["_id"]),
+                name=service["name"],
+                description=service["description"],
+                image=service.get("image"),
+                duration=service["duration"],
+                isAvailable=service["isAvailable"],
+                features=service.get("features", []),
+                requirements=service.get("requirements", []),
+                category_id=service.get("category_id"),
+                tier_id=service.get("tier_id"),
+                createdAt=service["createdAt"],
+                updatedAt=service["updatedAt"],
+                category=category_obj,
+                tier=tier_obj
+            )
+        )
+
+    return result
 
 
 @app.get("/services/{service_id}", response_model=Service)
 async def get_service(service_id: str):
+    """Get a specific service"""
     try:
         service = db.services.find_one({"_id": ObjectId(service_id)})
         if not service:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Service not found",
+                detail="Service not found"
             )
+
+        # Get category info
+        category_obj = None
+        if service.get("category_id"):
+            category = db.service_categories.find_one({"_id": ObjectId(service["category_id"])})
+            if category:
+                category_obj = ServiceCategory(
+                    id=str(category["_id"]),
+                    name=category["name"],
+                    description=category["description"],
+                    category_type=category["category_type"],
+                    image=category.get("image"),
+                    is_active=category["is_active"],
+                    created_at=category["created_at"],
+                    updated_at=category["updated_at"],
+                    tiers=[],
+                    services=[]
+                )
+
+        # Get tier info
+        tier_obj = None
+        if service.get("tier_id"):
+            tier = db.service_tiers.find_one({"_id": ObjectId(service["tier_id"])})
+            if tier:
+                tier_obj = ServiceTier(
+                    id=str(tier["_id"]),
+                    name=tier["name"],
+                    description=tier["description"],
+                    price=tier["price"],
+                    category_id=tier["category_id"],
+                    image=tier.get("image"),
+                    features=tier.get("features", []),
+                    is_popular=tier.get("is_popular", False),
+                    is_available=tier.get("is_available", True),
+                    created_at=tier["created_at"],
+                    updated_at=tier["updated_at"],
+                    services=[]
+                )
 
         return Service(
             id=str(service["_id"]),
             name=service["name"],
             description=service["description"],
-            category=service["category"],
-            price=service["price"],
             image=service.get("image"),
             duration=service["duration"],
             isAvailable=service["isAvailable"],
+            features=service.get("features", []),
+            requirements=service.get("requirements", []),
+            category_id=service.get("category_id"),
+            tier_id=service.get("tier_id"),
             createdAt=service["createdAt"],
-            updatedAt=service["updatedAt"]
+            updatedAt=service["updatedAt"],
+            category=category_obj,
+            tier=tier_obj
         )
     except Exception as e:
         logger.error(f"Error getting service: {e}")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Service not found",
+            detail="Service not found"
         )
-
-
-# @app.post("/services", response_model=Service)
-# async def create_service(
-#         service: ServiceCreate,
-#         current_user: UserInDB = Depends(get_admin_user)
-# ):
-#     if not service.name.strip() or not service.description.strip() or not service.category.strip() or not service.duration.strip():
-#         raise HTTPException(
-#             status_code=status.HTTP_400_BAD_REQUEST,
-#             detail="Name, description, category, and duration are required"
-#         )
-#
-#     service_in_db = ServiceInDB(**service.dict())
-#     result = db.services.insert_one(service_in_db.dict(by_alias=True))
-#
-#     created_service = db.services.find_one({"_id": result.inserted_id})
-#
-#     return Service(
-#         id=str(created_service["_id"]),
-#         name=created_service["name"],
-#         description=created_service["description"],
-#         category=created_service["category"],
-#         price=created_service["price"],
-#         image=created_service.get("image"),
-#         duration=created_service["duration"],
-#         isAvailable=created_service["isAvailable"],
-#         createdAt=created_service["createdAt"],
-#         updatedAt=created_service["updatedAt"]
-#     )
 
 
 @app.post("/services", response_model=Service)
@@ -2383,32 +1791,101 @@ async def create_service(
         service: ServiceCreate,
         current_user: UserInDB = Depends(get_admin_user)
 ):
-    if not service.name.strip() or not service.description.strip() or not service.category.strip() or not service.duration.strip():
+    """Create a new service"""
+    if not service.name.strip() or not service.description.strip() or not service.duration.strip():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Name, description, category, and duration are required"
+            detail="Name, description, and duration are required"
         )
+
+    # Validate category exists
+    if service.category_id:
+        category = db.service_categories.find_one({"_id": ObjectId(service.category_id)})
+        if not category:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Service category not found"
+            )
+
+    # Validate tier if specified
+    if service.tier_id:
+        tier = db.service_tiers.find_one({"_id": ObjectId(service.tier_id)})
+        if not tier:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Service tier not found"
+            )
+
+        # Ensure tier belongs to the specified category
+        if service.category_id and tier["category_id"] != service.category_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Tier does not belong to the specified category"
+            )
 
     service_in_db = ServiceInDB(**service.dict())
     service_dict = service_in_db.dict(by_alias=True)
-    if service_dict["_id"] is None:
-        del service_dict["_id"]  # Remove _id if it's None to let MongoDB generate it
+    if service_dict.get("_id") is None:
+        del service_dict["_id"]
     result = db.services.insert_one(service_dict)
 
     created_service = db.services.find_one({"_id": result.inserted_id})
+
+    # Get category and tier info
+    category_obj = None
+    tier_obj = None
+
+    if created_service.get("category_id"):
+        category = db.service_categories.find_one({"_id": ObjectId(created_service["category_id"])})
+        if category:
+            category_obj = ServiceCategory(
+                id=str(category["_id"]),
+                name=category["name"],
+                description=category["description"],
+                category_type=category["category_type"],
+                image=category.get("image"),
+                is_active=category["is_active"],
+                created_at=category["created_at"],
+                updated_at=category["updated_at"],
+                tiers=[],
+                services=[]
+            )
+
+    if created_service.get("tier_id"):
+        tier = db.service_tiers.find_one({"_id": ObjectId(created_service["tier_id"])})
+        if tier:
+            tier_obj = ServiceTier(
+                id=str(tier["_id"]),
+                name=tier["name"],
+                description=tier["description"],
+                price=tier["price"],
+                category_id=tier["category_id"],
+                image=tier.get("image"),
+                features=tier.get("features", []),
+                is_popular=tier.get("is_popular", False),
+                is_available=tier.get("is_available", True),
+                created_at=tier["created_at"],
+                updated_at=tier["updated_at"],
+                services=[]
+            )
 
     return Service(
         id=str(created_service["_id"]),
         name=created_service["name"],
         description=created_service["description"],
-        category=created_service["category"],
-        price=created_service["price"],
         image=created_service.get("image"),
         duration=created_service["duration"],
         isAvailable=created_service["isAvailable"],
+        features=created_service.get("features", []),
+        requirements=created_service.get("requirements", []),
+        category_id=created_service.get("category_id"),
+        tier_id=created_service.get("tier_id"),
         createdAt=created_service["createdAt"],
-        updatedAt=created_service["updatedAt"]
+        updatedAt=created_service["updatedAt"],
+        category=category_obj,
+        tier=tier_obj
     )
+
 
 @app.put("/services/{service_id}", response_model=Service)
 async def update_service(
@@ -2421,10 +1898,29 @@ async def update_service(
         if not service:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Service not found",
+                detail="Service not found"
             )
 
         update_data = service_update.dict(exclude_unset=True)
+
+        # Validate category if being updated
+        if "category_id" in update_data and update_data["category_id"]:
+            category = db.service_categories.find_one({"_id": ObjectId(update_data["category_id"])})
+            if not category:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Service category not found"
+                )
+
+        # Validate tier if being updated
+        if "tier_id" in update_data and update_data["tier_id"]:
+            tier = db.service_tiers.find_one({"_id": ObjectId(update_data["tier_id"])})
+            if not tier:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Service tier not found"
+                )
+
         if update_data:
             if "name" in update_data and not update_data["name"].strip():
                 raise HTTPException(
@@ -2435,11 +1931,6 @@ async def update_service(
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Description cannot be empty"
-                )
-            if "category" in update_data and not update_data["category"].strip():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Category cannot be empty"
                 )
             if "duration" in update_data and not update_data["duration"].strip():
                 raise HTTPException(
@@ -2456,30 +1947,71 @@ async def update_service(
             if result.modified_count == 0:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Service update failed",
+                    detail="Service update failed"
                 )
 
         updated_service = db.services.find_one({"_id": ObjectId(service_id)})
+
+        # Get category and tier info
+        category_obj = None
+        tier_obj = None
+
+        if updated_service.get("category_id"):
+            category = db.service_categories.find_one({"_id": ObjectId(updated_service["category_id"])})
+            if category:
+                category_obj = ServiceCategory(
+                    id=str(category["_id"]),
+                    name=category["name"],
+                    description=category["description"],
+                    category_type=category["category_type"],
+                    image=category.get("image"),
+                    is_active=category["is_active"],
+                    created_at=category["created_at"],
+                    updated_at=category["updated_at"],
+                    tiers=[],
+                    services=[]
+                )
+
+        if updated_service.get("tier_id"):
+            tier = db.service_tiers.find_one({"_id": ObjectId(updated_service["tier_id"])})
+            if tier:
+                tier_obj = ServiceTier(
+                    id=str(tier["_id"]),
+                    name=tier["name"],
+                    description=tier["description"],
+                    price=tier["price"],
+                    category_id=tier["category_id"],
+                    image=tier.get("image"),
+                    features=tier.get("features", []),
+                    is_popular=tier.get("is_popular", False),
+                    is_available=tier.get("is_available", True),
+                    created_at=tier["created_at"],
+                    updated_at=tier["updated_at"],
+                    services=[]
+                )
 
         return Service(
             id=str(updated_service["_id"]),
             name=updated_service["name"],
             description=updated_service["description"],
-            category=updated_service["category"],
-            price=updated_service["price"],
             image=updated_service.get("image"),
             duration=updated_service["duration"],
             isAvailable=updated_service["isAvailable"],
+            features=updated_service.get("features", []),
+            requirements=updated_service.get("requirements", []),
+            category_id=updated_service.get("category_id"),
+            tier_id=updated_service.get("tier_id"),
             createdAt=updated_service["createdAt"],
-            updatedAt=updated_service["updatedAt"]
+            updatedAt=updated_service["updatedAt"],
+            category=category_obj,
+            tier=tier_obj
         )
     except Exception as e:
         logger.error(f"Error updating service: {e}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Service update failed",
+            detail="Service update failed"
         )
-
 
 
 @app.delete("/services/{service_id}")
@@ -2492,14 +2024,14 @@ async def delete_service(
         if not service:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Service not found",
+                detail="Service not found"
             )
 
         bookings = db.bookings.find_one({"serviceId": service_id})
         if bookings:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Cannot delete service with existing bookings",
+                detail="Cannot delete service with existing bookings"
             )
 
         result = db.services.delete_one({"_id": ObjectId(service_id)})
@@ -2507,7 +2039,7 @@ async def delete_service(
         if result.deleted_count == 0:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Service deletion failed",
+                detail="Service deletion failed"
             )
 
         return {"message": "Service deleted successfully"}
@@ -2515,7 +2047,7 @@ async def delete_service(
         logger.error(f"Error deleting service: {e}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Service deletion failed",
+            detail="Service deletion failed"
         )
 
 
@@ -2530,290 +2062,302 @@ async def upload_service_image(
             detail="File must be an image"
         )
 
-    # Upload to Cloudinary
     image_url = upload_file_to_cloudinary(file, folder="naija_concierge/services")
-
     return {"imageUrl": image_url}
 
 
-# Package routes
-@app.get("/packages", response_model=List[Package])
-async def get_packages(
-        skip: int = 0,
-        limit: int = 100,
-        type: Optional[str] = None
+# Booking routes with proper tier/service handling
+@app.post("/bookings", response_model=Booking)
+async def create_booking(
+        booking: BookingCreate,
+        current_user: UserInDB = Depends(get_current_active_user)
 ):
-    query = {}
-    if type:
-        query["type"] = type
+    """Create a new booking for either a service or tier"""
+    if current_user.role != "admin" and booking.userId != str(current_user.id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not enough permissions"
+        )
 
-    packages = list(db.packages.find(query).skip(skip).limit(limit))
-    return [
-        Package(
-            id=str(package["_id"]),
-            name=package["name"],
-            description=package["description"],
-            price=package["price"],
-            duration=package["duration"],
-            features=package["features"],
-            image=package.get("image"),
-            type=package["type"],
-            isPopular=package["isPopular"],
-            createdAt=package["createdAt"],
-            updatedAt=package["updatedAt"]
-        ) for package in packages
-    ]
+    # Must have either serviceId or tierId, but not both
+    if not booking.serviceId and not booking.tierId:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Either serviceId or tierId must be provided"
+        )
 
+    if booking.serviceId and booking.tierId:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot book both service and tier simultaneously"
+        )
 
-@app.get("/packages/{package_id}", response_model=Package)
-async def get_package(package_id: str):
-    try:
-        package = db.packages.find_one({"_id": ObjectId(package_id)})
-        if not package:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Package not found",
+    service_obj = None
+    tier_obj = None
+    category_obj = None
+
+    if booking.serviceId:
+        # Individual service booking (contact-only)
+        try:
+            service = db.services.find_one({"_id": ObjectId(booking.serviceId)})
+            if not service:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Service not found"
+                )
+
+            if not service["isAvailable"]:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Service is not available"
+                )
+
+            # Get category to determine booking type
+            category = db.service_categories.find_one({"_id": ObjectId(service["category_id"])})
+            if not category:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Service category not found"
+                )
+
+            if category["category_type"] != ServiceCategoryType.CONTACT_ONLY:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Individual service booking only allowed for contact-only categories"
+                )
+
+            booking.booking_type = BookingType.CONSULTATION
+            booking.payment_required = False
+            booking.payment_amount = 0.0
+
+            service_obj = Service(
+                id=str(service["_id"]),
+                name=service["name"],
+                description=service["description"],
+                image=service.get("image"),
+                duration=service["duration"],
+                isAvailable=service["isAvailable"],
+                features=service.get("features", []),
+                requirements=service.get("requirements", []),
+                category_id=service.get("category_id"),
+                tier_id=service.get("tier_id"),
+                createdAt=service["createdAt"],
+                updatedAt=service["updatedAt"]
             )
 
-        return Package(
-            id=str(package["_id"]),
-            name=package["name"],
-            description=package["description"],
-            price=package["price"],
-            duration=package["duration"],
-            features=package["features"],
-            image=package.get("image"),
-            type=package["type"],
-            isPopular=package["isPopular"],
-            createdAt=package["createdAt"],
-            updatedAt=package["updatedAt"]
-        )
-    except Exception as e:
-        logger.error(f"Error getting package: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Package not found",
-        )
+            category_obj = ServiceCategory(
+                id=str(category["_id"]),
+                name=category["name"],
+                description=category["description"],
+                category_type=category["category_type"],
+                image=category.get("image"),
+                is_active=category["is_active"],
+                created_at=category["created_at"],
+                updated_at=category["updated_at"],
+                tiers=[],
+                services=[]
+            )
 
+        except Exception as e:
+            logger.error(f"Error checking service: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid service ID"
+            )
 
-@app.post("/packages", response_model=Package)
-async def create_package(
-        package: PackageCreate,
-        current_user: UserInDB = Depends(get_admin_user)
-):
-    if not package.name.strip() or not package.description.strip() or not package.type.strip() or not package.duration.strip():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Name, description, type, and duration are required"
-        )
-    if not package.features:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="At least one feature is required"
-        )
+    elif booking.tierId:
+        # Tier booking (online payment)
+        try:
+            tier = db.service_tiers.find_one({"_id": ObjectId(booking.tierId)})
+            if not tier:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Service tier not found"
+                )
 
-    package_in_db = PackageInDB(**package.dict())
-    result = db.packages.insert_one(package_in_db.dict(by_alias=True))
+            if not tier["is_available"]:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Service tier is not available"
+                )
 
-    created_package = db.packages.find_one({"_id": result.inserted_id})
+            # Get category to verify it's tiered
+            category = db.service_categories.find_one({"_id": ObjectId(tier["category_id"])})
+            if not category:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Service category not found"
+                )
 
-    return Package(
-        id=str(created_package["_id"]),
-        name=created_package["name"],
-        description=created_package["description"],
-        price=created_package["price"],
-        duration=created_package["duration"],
-        features=created_package["features"],
-        image=created_package.get("image"),
-        type=created_package["type"],
-        isPopular=created_package["isPopular"],
-        createdAt=created_package["createdAt"],
-        updatedAt=created_package["updatedAt"]
+            if category["category_type"] != ServiceCategoryType.TIERED:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Tier booking only allowed for tiered categories"
+                )
+
+            booking.booking_type = BookingType.TIER_BOOKING
+            booking.payment_required = True
+            booking.payment_amount = tier["price"]
+
+            # Get services in this tier
+            tier_services = list(db.services.find({"tier_id": booking.tierId}))
+            tier_service_objects = []
+
+            for service in tier_services:
+                tier_service_objects.append(
+                    Service(
+                        id=str(service["_id"]),
+                        name=service["name"],
+                        description=service["description"],
+                        image=service.get("image"),
+                        duration=service["duration"],
+                        isAvailable=service["isAvailable"],
+                        features=service.get("features", []),
+                        requirements=service.get("requirements", []),
+                        category_id=service.get("category_id"),
+                        tier_id=service.get("tier_id"),
+                        createdAt=service["createdAt"],
+                        updatedAt=service["updatedAt"]
+                    )
+                )
+
+            tier_obj = ServiceTier(
+                id=str(tier["_id"]),
+                name=tier["name"],
+                description=tier["description"],
+                price=tier["price"],
+                category_id=tier["category_id"],
+                image=tier.get("image"),
+                features=tier.get("features", []),
+                is_popular=tier.get("is_popular", False),
+                is_available=tier.get("is_available", True),
+                created_at=tier["created_at"],
+                updated_at=tier["updated_at"],
+                services=tier_service_objects
+            )
+
+            category_obj = ServiceCategory(
+                id=str(category["_id"]),
+                name=category["name"],
+                description=category["description"],
+                category_type=category["category_type"],
+                image=category.get("image"),
+                is_active=category["is_active"],
+                created_at=category["created_at"],
+                updated_at=category["updated_at"],
+                tiers=[],
+                services=[]
+            )
+
+        except Exception as e:
+            logger.error(f"Error checking tier: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid tier ID"
+            )
+
+    booking_in_db = BookingInDB(**booking.dict())
+    result = db.bookings.insert_one(booking_in_db.dict(by_alias=True))
+
+    created_booking = db.bookings.find_one({"_id": result.inserted_id})
+
+    user = get_user_by_id(booking.userId)
+    if user:
+        if booking.booking_type == BookingType.CONSULTATION:
+            booking_html = f"""
+            <html>
+                <body>
+                    <h1>Service Request Received</h1>
+                    <p>Dear {user.firstName},</p>
+                    <p>We have received your request for {service_obj.name} from {category_obj.name}.</p>
+                    <p>Our team will contact you within 24 hours to discuss your requirements and provide a custom quote.</p>
+                    <p>Booking Details:</p>
+                    <ul>
+                        <li>Service: {service_obj.name}</li>
+                        <li>Category: {category_obj.name}</li>
+                        <li>Preferred Date: {created_booking["bookingDate"].strftime("%Y-%m-%d %H:%M")}</li>
+                        <li>Contact Preference: {created_booking.get("contact_preference", "email")}</li>
+                        <li>Special Requests: {created_booking.get("specialRequests", "None")}</li>
+                    </ul>
+                    <p>Best regards,<br>The Naija Concierge Team</p>
+                </body>
+            </html>
+            """
+            send_email(user.email, "Service Request - Naija Concierge", booking_html)
+        elif booking.booking_type == BookingType.TIER_BOOKING:
+            service_list = ", ".join([s.name for s in tier_obj.services])
+            booking_html = f"""
+            <html>
+                <body>
+                    <h1>Tier Booking Confirmation - Payment Required</h1>
+                    <p>Dear {user.firstName},</p>
+                    <p>Your booking for {tier_obj.name} from {category_obj.name} has been received.</p>
+                    <p>To confirm your booking, please complete the payment of ₦{tier_obj.price}.</p>
+                    <p>Booking Details:</p>
+                    <ul>
+                        <li>Tier: {tier_obj.name}</li>
+                        <li>Category: {category_obj.name}</li>
+                        <li>Included Services: {service_list}</li>
+                        <li>Date: {created_booking["bookingDate"].strftime("%Y-%m-%d %H:%M")}</li>
+                        <li>Amount: ₦{tier_obj.price}</li>
+                        <li>Status: Pending Payment</li>
+                    </ul>
+                    <p>Best regards,<br>The Naija Concierge Team</p>
+                </body>
+            </html>
+            """
+            send_email(user.email, "Tier Booking Confirmation - Payment Required", booking_html)
+
+    # Send admin notification
+    if booking.booking_type == BookingType.CONSULTATION:
+        notification_message = f"""
+        New service request:
+        - Client: {user.firstName} {user.lastName}
+        - Service: {service_obj.name}
+        - Category: {category_obj.name}
+        - Date: {created_booking["bookingDate"].strftime("%Y-%m-%d %H:%M")}
+        - Type: Contact Required
+        """
+    else:
+        service_list = ", ".join([s.name for s in tier_obj.services])
+        notification_message = f"""
+        New tier booking:
+        - Client: {user.firstName} {user.lastName}
+        - Tier: {tier_obj.name}
+        - Category: {category_obj.name}
+        - Services: {service_list}
+        - Date: {created_booking["bookingDate"].strftime("%Y-%m-%d %H:%M")}
+        - Amount: ₦{tier_obj.price}
+        - Payment Required: Yes
+        """
+
+    send_admin_notification("New Booking Created", notification_message)
+
+    return Booking(
+        id=str(created_booking["_id"]),
+        userId=created_booking["userId"],
+        serviceId=created_booking.get("serviceId"),
+        tierId=created_booking.get("tierId"),
+        bookingDate=created_booking["bookingDate"],
+        status=created_booking["status"],
+        specialRequests=created_booking.get("specialRequests"),
+        booking_type=created_booking["booking_type"],
+        contact_preference=created_booking.get("contact_preference"),
+        payment_required=created_booking["payment_required"],
+        payment_amount=created_booking.get("payment_amount"),
+        createdAt=created_booking["createdAt"],
+        updatedAt=created_booking["updatedAt"],
+        service=service_obj,
+        tier=tier_obj
     )
 
 
-@app.get("/packages/{package_id}/convert")
-async def convert_package_price(
-    package_id: str,
-    currency: str,
-    current_user: UserInDB = Depends(get_current_active_user)
-):
-    """
-    Convert package price to the specified currency.
-    """
-    allowed_currencies = ["NGN", "USD", "EUR", "GBP"]
-    if currency not in allowed_currencies:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Currency must be one of {allowed_currencies}"
-        )
-
-    try:
-        package = db.packages.find_one({"_id": ObjectId(package_id)})
-        if not package:
-            raise HTTPException(
-                status_code=404,
-                detail="Package not found"
-            )
-    except Exception as e:
-        logger.error(f"Error fetching package: {e}")
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid package ID"
-        )
-
-    base_currency = "NGN"
-    amount = package["price"]
-
-    if currency != base_currency:
-        try:
-            exchange_rate = await get_exchange_rate(base_currency, currency)
-            amount = round(package["price"] * exchange_rate, 2)
-        except Exception as e:
-            logger.error(f"Exchange rate conversion failed: {e}")
-            raise HTTPException(
-                status_code=500,
-                detail="Failed to fetch exchange rate"
-            )
-
-    return {"convertedPrice": amount}
-
-@app.put("/packages/{package_id}", response_model=Package)
-async def update_package(
-        package_id: str,
-        package_update: PackageUpdate,
-        current_user: UserInDB = Depends(get_admin_user)
-):
-    try:
-        package = db.packages.find_one({"_id": ObjectId(package_id)})
-        if not package:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Package not found",
-            )
-
-        update_data = package_update.dict(exclude_unset=True)
-        if update_data:
-            if "name" in update_data and not update_data["name"].strip():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Name cannot be empty"
-                )
-            if "description" in update_data and not update_data["description"].strip():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Description cannot be empty"
-                )
-            if "type" in update_data and not update_data["type"].strip():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Type cannot be empty"
-                )
-            if "duration" in update_data and not update_data["duration"].strip():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Duration cannot be empty"
-                )
-            if "features" in update_data and not update_data["features"]:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="At least one feature is required"
-                )
-
-            update_data["updatedAt"] = datetime.utcnow()
-            result = db.packages.update_one(
-                {"_id": ObjectId(package_id)},
-                {"$set": update_data}
-            )
-
-            if result.modified_count == 0:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Package update failed",
-                )
-
-        updated_package = db.packages.find_one({"_id": ObjectId(package_id)})
-
-        return Package(
-            id=str(updated_package["_id"]),
-            name=updated_package["name"],
-            description=updated_package["description"],
-            price=updated_package["price"],
-            duration=updated_package["duration"],
-            features=updated_package["features"],
-            image=updated_package.get("image"),
-            type=updated_package["type"],
-            isPopular=updated_package["isPopular"],
-            createdAt=updated_package["createdAt"],
-            updatedAt=updated_package["updatedAt"]
-        )
-    except Exception as e:
-        logger.error(f"Error updating package: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Package update failed",
-        )
-
-
-@app.delete("/packages/{package_id}")
-async def delete_package(
-        package_id: str,
-        current_user: UserInDB = Depends(get_admin_user)
-):
-    try:
-        package = db.packages.find_one({"_id": ObjectId(package_id)})
-        if not package:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Package not found",
-            )
-
-        subscriptions = db.subscriptions.find_one({"packageId": package_id})
-        if subscriptions:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Cannot delete package with existing subscriptions",
-            )
-
-        result = db.packages.delete_one({"_id": ObjectId(package_id)})
-
-        if result.deleted_count == 0:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Package deletion failed",
-            )
-
-        return {"message": "Package deleted successfully"}
-    except Exception as e:
-        logger.error(f"Error deleting package: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Package deletion failed",
-        )
-
-@app.post("/packages/image")
-async def upload_package_image(
-        file: UploadFile = File(...),
-        current_user: UserInDB = Depends(get_admin_user)
-):
-    if not file.content_type.startswith("image/"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="File must be an image"
-        )
-
-    # Upload to Cloudinary
-    image_url = upload_file_to_cloudinary(file, folder="naija_concierge/packages")
-
-    return {"imageUrl": image_url}
-
-
-# Booking routes
 @app.get("/bookings", response_model=List[Booking])
 async def get_bookings(
         skip: int = 0,
         limit: int = 100,
         status: Optional[str] = None,
+        booking_type: Optional[BookingType] = None,
         current_user: UserInDB = Depends(get_current_active_user)
 ):
     query = {}
@@ -2821,39 +2365,92 @@ async def get_bookings(
         query["userId"] = str(current_user.id)
     if status:
         query["status"] = status
+    if booking_type:
+        query["booking_type"] = booking_type
 
     bookings = list(db.bookings.find(query).skip(skip).limit(limit))
     result = []
 
     for booking in bookings:
         try:
-            service = db.services.find_one({"_id": ObjectId(booking["serviceId"])})
             service_obj = None
-            if service:
-                service_obj = Service(
-                    id=str(service["_id"]),
-                    name=service["name"],
-                    description=service["description"],
-                    category=service["category"],
-                    price=service["price"],
-                    image=service.get("image"),
-                    duration=service["duration"],
-                    isAvailable=service["isAvailable"],
-                    createdAt=service["createdAt"],
-                    updatedAt=service["updatedAt"]
-                )
+            tier_obj = None
+
+            if booking.get("serviceId"):
+                service = db.services.find_one({"_id": ObjectId(booking["serviceId"])})
+                if service:
+                    service_obj = Service(
+                        id=str(service["_id"]),
+                        name=service["name"],
+                        description=service["description"],
+                        image=service.get("image"),
+                        duration=service["duration"],
+                        isAvailable=service["isAvailable"],
+                        features=service.get("features", []),
+                        requirements=service.get("requirements", []),
+                        category_id=service.get("category_id"),
+                        tier_id=service.get("tier_id"),
+                        createdAt=service["createdAt"],
+                        updatedAt=service["updatedAt"]
+                    )
+
+            if booking.get("tierId"):
+                tier = db.service_tiers.find_one({"_id": ObjectId(booking["tierId"])})
+                if tier:
+                    # Get services for this tier
+                    tier_services = list(db.services.find({"tier_id": booking["tierId"]}))
+                    tier_service_objects = []
+
+                    for service in tier_services:
+                        tier_service_objects.append(
+                            Service(
+                                id=str(service["_id"]),
+                                name=service["name"],
+                                description=service["description"],
+                                image=service.get("image"),
+                                duration=service["duration"],
+                                isAvailable=service["isAvailable"],
+                                features=service.get("features", []),
+                                requirements=service.get("requirements", []),
+                                category_id=service.get("category_id"),
+                                tier_id=service.get("tier_id"),
+                                createdAt=service["createdAt"],
+                                updatedAt=service["updatedAt"]
+                            )
+                        )
+
+                    tier_obj = ServiceTier(
+                        id=str(tier["_id"]),
+                        name=tier["name"],
+                        description=tier["description"],
+                        price=tier["price"],
+                        category_id=tier["category_id"],
+                        image=tier.get("image"),
+                        features=tier.get("features", []),
+                        is_popular=tier.get("is_popular", False),
+                        is_available=tier.get("is_available", True),
+                        created_at=tier["created_at"],
+                        updated_at=tier["updated_at"],
+                        services=tier_service_objects
+                    )
 
             result.append(
                 Booking(
                     id=str(booking["_id"]),
                     userId=booking["userId"],
-                    serviceId=booking["serviceId"],
+                    serviceId=booking.get("serviceId"),
+                    tierId=booking.get("tierId"),
                     bookingDate=booking["bookingDate"],
                     status=booking["status"],
                     specialRequests=booking.get("specialRequests"),
+                    booking_type=booking.get("booking_type", BookingType.CONSULTATION),
+                    contact_preference=booking.get("contact_preference"),
+                    payment_required=booking.get("payment_required", False),
+                    payment_amount=booking.get("payment_amount"),
                     createdAt=booking["createdAt"],
                     updatedAt=booking["updatedAt"],
-                    service=service_obj
+                    service=service_obj,
+                    tier=tier_obj
                 )
             )
         except Exception as e:
@@ -2862,1599 +2459,293 @@ async def get_bookings(
     return result
 
 
-@app.get("/bookings/{booking_id}", response_model=Booking)
-async def get_booking(
-        booking_id: str,
+# Enhanced Airtable booking with tier support
+@app.post("/bookings/airtable", response_model=Booking)
+async def create_airtable_booking(
+        booking_form: AirtableBookingForm,
         current_user: UserInDB = Depends(get_current_active_user)
 ):
     try:
-        booking = db.bookings.find_one({"_id": ObjectId(booking_id)})
-        if not booking:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Booking not found",
-            )
-
-        # Regular users can only see their own bookings
-        if current_user.role != "admin" and booking["userId"] != str(current_user.id):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Not enough permissions",
-            )
-
-        service = db.services.find_one({"_id": ObjectId(booking["serviceId"])})
-        service_obj = None
-        if service:
-            service_obj = Service(
-                id=str(service["_id"]),
-                name=service["name"],
-                description=service["description"],
-                category=service["category"],
-                price=service["price"],
-                image=service.get("image"),
-                duration=service["duration"],
-                isAvailable=service["isAvailable"],
-                createdAt=service["createdAt"],
-                updatedAt=service["updatedAt"]
-            )
-
-        return Booking(
-            id=str(booking["_id"]),
-            userId=booking["userId"],
-            serviceId=booking["serviceId"],
-            bookingDate=booking["bookingDate"],
-            status=booking["status"],
-            specialRequests=booking.get("specialRequests"),
-            createdAt=booking["createdAt"],
-            updatedAt=booking["updatedAt"],
-            service=service_obj
-        )
-    except Exception as e:
-        logger.error(f"Error getting booking: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Booking not found",
-        )
-
-
-@app.post("/bookings", response_model=Booking)
-async def create_booking(
-        booking: BookingCreate,
-        current_user: UserInDB = Depends(get_current_active_user)
-):
-    if current_user.role != "admin" and booking.userId != str(current_user.id):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not enough permissions",
-        )
-
-    try:
-        service = db.services.find_one({"_id": ObjectId(booking.serviceId)})
-        if not service:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Service not found",
-            )
-
-        if not service["isAvailable"]:
+        if not booking_form.clientName.strip() or booking_form.clientName.lower() == "string":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Service is not available",
-            )
-    except Exception as e:
-        logger.error(f"Error checking service: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid service ID",
-        )
-
-    booking_in_db = BookingInDB(**booking.dict())
-    result = db.bookings.insert_one(booking_in_db.dict(by_alias=True))
-
-    created_booking = db.bookings.find_one({"_id": result.inserted_id})
-
-    service_obj = Service(
-        id=str(service["_id"]),
-        name=service["name"],
-        description=service["description"],
-        category=service["category"],
-        price=service["price"],
-        image=service.get("image"),
-        duration=service["duration"],
-        isAvailable=service["isAvailable"],
-        createdAt=service["createdAt"],
-        updatedAt=service["updatedAt"]
-    )
-
-    user = get_user_by_id(booking.userId)
-    if user:
-        booking_html = f"""
-        <html>
-            <body>
-                <h1>Booking Confirmation</h1>
-                <p>Dear {user.firstName},</p>
-                <p>Your booking for {service["name"]} has been received and is currently {created_booking["status"]}.</p>
-                <p>Booking Details:</p>
-                <ul>
-                    <li>Service: {service["name"]}</li>
-                    <li>Date: {created_booking["bookingDate"].strftime("%Y-%m-%d %H:%M")}</li>
-                    <li>Status: {created_booking["status"]}</li>
-                    <li>Price: ₦{service["price"]}</li>
-                </ul>
-                <p>We will contact you shortly to confirm your booking.</p>
-                <p>Best regards,<br>The Naija Concierge Team</p>
-            </body>
-        </html>
-        """
-        send_email(user.email, "Booking Confirmation - Naija Concierge", booking_html)
-
-    notification_message = f"""
-    New booking created:
-    - Client: {user.firstName} {user.lastName}
-    - Service: {service["name"]}
-    - Date: {created_booking["bookingDate"].strftime("%Y-%m-%d %H:%M")}
-    - Status: {created_booking["status"]}
-    """
-    send_admin_notification("New Booking Created", notification_message)
-
-    return Booking(
-        id=str(created_booking["_id"]),
-        userId=created_booking["userId"],
-        serviceId=created_booking["serviceId"],
-        bookingDate=created_booking["bookingDate"],
-        status=created_booking["status"],
-        specialRequests=created_booking.get("specialRequests"),
-        createdAt=created_booking["createdAt"],
-        updatedAt=created_booking["updatedAt"],
-        service=service_obj
-    )
-
-
-@app.put("/bookings/{booking_id}", response_model=Booking)
-async def update_booking(
-        booking_id: str,
-        booking_update: BookingUpdate,
-        current_user: UserInDB = Depends(get_current_active_user)
-):
-    try:
-        booking = db.bookings.find_one({"_id": ObjectId(booking_id)})
-        if not booking:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Booking not found",
+                detail="Client name must be a valid name, not 'string' or empty"
             )
 
-        if current_user.role != "admin" and booking["userId"] != str(current_user.id):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Not enough permissions",
-            )
-
-        update_data = booking_update.dict(exclude_unset=True)
-        if current_user.role != "admin" and "status" in update_data:
-            if update_data["status"] != "cancelled":
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Not enough permissions to change status",
-                )
-
-        if update_data:
-            update_data["updatedAt"] = datetime.utcnow()
-            result = db.bookings.update_one(
-                {"_id": ObjectId(booking_id)},
-                {"$set": update_data}
-            )
-
-            if result.modified_count == 0:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Booking update failed",
-                )
-
-        updated_booking = db.bookings.find_one({"_id": ObjectId(booking_id)})
-
-        service = db.services.find_one({"_id": ObjectId(updated_booking["serviceId"])})
-        service_obj = None
-        if service:
-            service_obj = Service(
-                id=str(service["_id"]),
-                name=service["name"],
-                description=service["description"],
-                category=service["category"],
-                price=service["price"],
-                image=service.get("image"),
-                duration=service["duration"],
-                isAvailable=service["isAvailable"],
-                createdAt=service["createdAt"],
-                updatedAt=service["updatedAt"]
-            )
-
-        if "status" in update_data:
-            user = get_user_by_id(updated_booking["userId"])
-            if user:
-                status_update_html = f"""
-                <html>
-                    <body>
-                        <h1>Booking Status Update</h1>
-                        <p>Dear {user.firstName},</p>
-                        <p>Your booking for {service["name"]} has been updated to {updated_booking["status"]}.</p>
-                        <p>Booking Details:</p>
-                        <ul>
-                            <li>Service: {service["name"]}</li>
-                            <li>Date: {updated_booking["bookingDate"].strftime("%Y-%m-%d %H:%M")}</li>
-                            <li>Status: {updated_booking["status"]}</li>
-                        </ul>
-                        <p>If you have any questions, please contact us.</p>
-                        <p>Best regards,<br>The Naija Concierge Team</p>
-                    </body>
-                </html>
-                """
-                send_email(user.email, "Booking Status Update - Naija Concierge", status_update_html)
-
-            notification_message = f"""
-            Booking status updated:
-            - Client: {user.firstName} {user.lastName}
-            - Service: {service["name"]}
-            - Date: {updated_booking["bookingDate"].strftime("%Y-%m-%d %H:%M")}
-            - New Status: {updated_booking["status"]}
-            """
-            send_admin_notification("Booking Status Updated", notification_message)
-
-        return Booking(
-            id=str(updated_booking["_id"]),
-            userId=updated_booking["userId"],
-            serviceId=updated_booking["serviceId"],
-            bookingDate=updated_booking["bookingDate"],
-            status=updated_booking["status"],
-            specialRequests=updated_booking.get("specialRequests"),
-            createdAt=updated_booking["createdAt"],
-            updatedAt=updated_booking["updatedAt"],
-            service=service_obj
-        )
-    except Exception as e:
-        logger.error(f"Error updating booking: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Booking update failed",
-        )
-
-@app.delete("/bookings/{booking_id}")
-async def delete_booking(
-        booking_id: str,
-        current_user: UserInDB = Depends(get_admin_user)
-):
-    try:
-        booking = db.bookings.find_one({"_id": ObjectId(booking_id)})
-        if not booking:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Booking not found",
-            )
-
-        result = db.bookings.delete_one({"_id": ObjectId(booking_id)})
-
-        if result.deleted_count == 0:
+        # Must have either serviceId or tierId, but not both
+        if not booking_form.serviceId and not booking_form.tierId:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Booking deletion failed",
+                detail="Either serviceId or tierId must be provided"
             )
 
-        return {"message": "Booking deleted successfully"}
-    except Exception as e:
-        logger.error(f"Error deleting booking: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Booking deletion failed",
-        )
-
-# Subscription routes
-@app.get("/subscriptions", response_model=List[Subscription])
-async def get_subscriptions(
-        skip: int = 0,
-        limit: int = 100,
-        status: Optional[str] = None,
-        current_user: UserInDB = Depends(get_current_active_user)
-):
-    query = {}
-    if current_user.role != "admin":
-        query["userId"] = str(current_user.id)
-    if status:
-        query["status"] = status
-
-    subscriptions = list(db.subscriptions.find(query).skip(skip).limit(limit))
-    result = []
-
-    for subscription in subscriptions:
-        try:
-            package = db.packages.find_one({"_id": ObjectId(subscription["packageId"])})
-            package_obj = None
-            if package:
-                package_obj = Package(
-                    id=str(package["_id"]),
-                    name=package["name"],
-                    description=package["description"],
-                    price=package["price"],
-                    duration=package["duration"],
-                    features=package["features"],
-                    image=package.get("image"),
-                    type=package["type"],
-                    isPopular=package["isPopular"],
-                    createdAt=package["createdAt"],
-                    updatedAt=package["updatedAt"]
-                )
-
-            result.append(
-                Subscription(
-                    id=str(subscription["_id"]),
-                    userId=subscription["userId"],
-                    packageId=subscription["packageId"],
-                    startDate=subscription["startDate"],
-                    endDate=subscription["endDate"],
-                    status=subscription["status"],
-                    createdAt=subscription["createdAt"],
-                    updatedAt=subscription["updatedAt"],
-                    package=package_obj
-                )
-            )
-        except Exception as e:
-            logger.error(f"Error processing subscription: {e}")
-
-    return result
-
-@app.get("/subscriptions/{subscription_id}", response_model=Subscription)
-async def get_subscription(
-        subscription_id: str,
-        current_user: UserInDB = Depends(get_current_active_user)
-):
-    try:
-        subscription = db.subscriptions.find_one({"_id": ObjectId(subscription_id)})
-        if not subscription:
+        if booking_form.serviceId and booking_form.tierId:
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Subscription not found",
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot book both service and tier simultaneously"
             )
 
-        if current_user.role != "admin" and subscription["userId"] != str(current_user.id):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Not enough permissions",
-            )
+        booking_email = current_user.email
 
-        package = db.packages.find_one({"_id": ObjectId(subscription["packageId"])})
-        package_obj = None
-        if package:
-            package_obj = Package(
-                id=str(package["_id"]),
-                name=package["name"],
-                description=package["description"],
-                price=package["price"],
-                duration=package["duration"],
-                features=package["features"],
-                image=package.get("image"),
-                type=package["type"],
-                isPopular=package["isPopular"],
-                createdAt=package["createdAt"],
-                updatedAt=package["updatedAt"]
-            )
-
-        return Subscription(
-            id=str(subscription["_id"]),
-            userId=subscription["userId"],
-            packageId=subscription["packageId"],
-            startDate=subscription["startDate"],
-            endDate=subscription["endDate"],
-            status=subscription["status"],
-            createdAt=subscription["createdAt"],
-            updatedAt=subscription["updatedAt"],
-            package=package_obj
-        )
-    except Exception as e:
-        logger.error(f"Error getting subscription: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Subscription not found",
-        )
-
-
-# @app.post("/subscriptions", response_model=Subscription)
-# async def create_subscription(
-#         subscription: SubscriptionCreate,
-#         current_user: UserInDB = Depends(get_current_active_user)
-# ):
-#     if current_user.role != "admin" and subscription.userId != str(current_user.id):
-#         raise HTTPException(
-#             status_code=status.HTTP_403_FORBIDDEN,
-#             detail="Not enough permissions",
-#         )
-#
-#     try:
-#         package = db.packages.find_one({"_id": ObjectId(subscription.packageId)})
-#         if not package:
-#             raise HTTPException(
-#                 status_code=status.HTTP_404_NOT_FOUND,
-#                 detail="Package not found",
-#             )
-#     except Exception as e:
-#         logger.error(f"Error checking package: {e}")
-#         raise HTTPException(
-#             status_code=status.HTTP_400_BAD_REQUEST,
-#             detail="Invalid package ID",
-#         )
-#
-#     active_subscription = db.subscriptions.find_one({
-#         "userId": subscription.userId,
-#         "status": "active"
-#     })
-#     if active_subscription:
-#         raise HTTPException(
-#             status_code=status.HTTP_400_BAD_REQUEST,
-#             detail="User already has an active subscription",
-#         )
-#
-#     subscription_in_db = SubscriptionInDB(**subscription.dict())
-#     result = db.subscriptions.insert_one(subscription_in_db.dict(by_alias=True))
-#
-#     created_subscription = db.subscriptions.find_one({"_id": result.inserted_id})
-#
-#     package_obj = Package(
-#         id=str(package["_id"]),
-#         name=package["name"],
-#         description=package["description"],
-#         price=package["price"],
-#         duration=package["duration"],
-#         features=package["features"],
-#         image=package.get("image"),
-#         type=package["type"],
-#         isPopular=package["isPopular"],
-#         createdAt=package["createdAt"],
-#         updatedAt=package["updatedAt"]
-#     )
-#
-#     user = get_user_by_id(subscription.userId)
-#     if user:
-#         subscription_html = f"""
-#         <html>
-#             <body>
-#                 <h1>Subscription Confirmation</h1>
-#                 <p>Dear {user.firstName},</p>
-#                 <p>Your subscription to the {package["name"]} package has been successfully created.</p>
-#                 <p>Subscription Details:</p>
-#                 <ul>
-#                     <li>Package: {package["name"]}</li>
-#                     <li>Start Date: {created_subscription["startDate"].strftime("%Y-%m-%d")}</li>
-#                     <li>End Date: {created_subscription["endDate"].strftime("%Y-%m-%d")}</li>
-#                     <li>Price: ₦{package["price"]}</li>
-#                     <li>Status: {created_subscription["status"]}</li>
-#                 </ul>
-#                 <p>Thank you for choosing Naija Concierge. If you have any questions, please contact us.</p>
-#                 <p>Best regards,<br>The Naija Concierge Team</p>
-#             </body>
-#         </html>
-#         """
-#         send_email(user.email, "Subscription Confirmation - Naija Concierge", subscription_html)
-#
-#     notification_message = f"""
-#     New subscription created:
-#     - Client: {user.firstName} {user.lastName}
-#     - Package: {package["name"]}
-#     - Start Date: {created_subscription["startDate"].strftime("%Y-%m-%d")}
-#     - Status: {created_subscription["status"]}
-#     """
-#     send_admin_notification("New Subscription Created", notification_message)
-#
-#     return Subscription(
-#         id=str(created_subscription["_id"]),
-#         userId=created_subscription["userId"],
-#         packageId=created_subscription["packageId"],
-#         startDate=created_subscription["startDate"],
-#         endDate=created_subscription["endDate"],
-#         status=created_subscription["status"],
-#         createdAt=created_subscription["createdAt"],
-#         updatedAt=created_subscription["updatedAt"],
-#         package=package_obj
-#     )
-
-
-
-@app.post("/subscriptions", response_model=Subscription)
-async def create_subscription(
-        subscription: SubscriptionCreate,
-        current_user: dict = Depends(get_current_active_user)
-):
-    if current_user["role"] != "admin" and subscription.userId != str(current_user["id"]):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not enough permissions",
-        )
-
-    try:
-        package = db.packages.find_one({"_id": ObjectId(subscription.packageId)})
-        if not package:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Package not found",
-            )
-    except Exception as e:
-        logger.error(f"Error checking package: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid package ID",
-        )
-
-    active_subscription = db.subscriptions.find_one({
-        "userId": subscription.userId,
-        "status": "active"
-    })
-    if active_subscription:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="User already has an active subscription",
-        )
-
-    # Verify payment transaction
-    transaction = db.transactions.find_one({
-        "subscriptionId": f"pending_{subscription.userId}_{subscription.packageId}",
-        "status": "success"
-    })
-    if not transaction:
-        raise HTTPException(
-            status_code=status.HTTP_402_PAYMENT_REQUIRED,
-            detail="Payment required to create subscription",
-        )
-
-    # Create subscription
-    subscription_in_db = SubscriptionInDB(
-        userId=subscription.userId,
-        packageId=subscription.packageId,
-        startDate=datetime.utcnow(),
-        endDate=datetime.utcnow() + timedelta(days=package["duration"]),
-        status=SubscriptionStatus.active,
-        createdAt=datetime.utcnow(),
-        updatedAt=datetime.utcnow()
-    )
-    result = db.subscriptions.insert_one(subscription_in_db.dict(by_alias=True))
-
-    created_subscription = db.subscriptions.find_one({"_id": result.inserted_id})
-
-    package_obj = Package(
-        id=str(package["_id"]),
-        name=package["name"],
-        description=package["description"],
-        price=package["price"],
-        duration=package["duration"],
-        features=package["features"],
-        image=package.get("image"),
-        type=package["type"],
-        isPopular=package["isPopular"],
-        createdAt=package["createdAt"],
-        updatedAt=package["updatedAt"]
-    )
-
-    user = get_user_by_id(subscription.userId)
-    if user:
-        subscription_html = f"""
-        <html>
-            <body>
-                <h1>Subscription Confirmation</h1>
-                <p>Dear {user["firstName"]},</p>
-                <p>Your subscription to the {package["name"]} package has been successfully created.</p>
-                <p>Subscription Details:</p>
-                <ul>
-                    <li>Package: {package["name"]}</li>
-                    <li>Start Date: {created_subscription["startDate"].strftime("%Y-%m-%d")}</li>
-                    <li>End Date: {created_subscription["endDate"].strftime("%Y-%m-%d")}</li>
-                    <li>Price: {transaction["currency"]} {transaction["amount"]}</li>
-                    <li>Status: {created_subscription["status"]}</li>
-                </ul>
-                <p>Thank you for choosing Naija Concierge. If you have any questions, please contact us.</p>
-                <p>Best regards,<br>The Naija Concierge Team</p>
-            </body>
-        </html>
-        """
-        send_email(user["email"], "Subscription Confirmation - Naija Concierge", subscription_html)
-
-    notification_message = f"""
-    New subscription created:
-    - Client: {user["firstName"]} {user["lastName"]}
-    - Package: {package["name"]}
-    - Start Date: {created_subscription["startDate"].strftime("%Y-%m-%d")}
-    - Status: {created_subscription["status"]}
-    - Amount Paid: {transaction["currency"]} {transaction["amount"]}
-    """
-    send_admin_notification("New Subscription Created", notification_message)
-
-    return Subscription(
-        id=str(created_subscription["_id"]),
-        userId=created_subscription["userId"],
-        packageId=created_subscription["packageId"],
-        startDate=created_subscription["startDate"],
-        endDate=created_subscription["endDate"],
-        status=created_subscription["status"],
-        createdAt=created_subscription["createdAt"],
-        updatedAt=created_subscription["updatedAt"],
-        package=package_obj
-    )
-
-
-@app.post("/subscriptions/initiate_payment")
-async def initiate_subscription_payment(
-    subscription: SubscriptionInitiate,
-    current_user: UserInDB = Depends(get_current_active_user)
-):
-    # Validate permissions
-    if current_user.role != "admin" and subscription.userId != str(current_user.id):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not enough permissions",
-        )
-
-    # Validate package
-    try:
-        package = db.packages.find_one({"_id": ObjectId(subscription.packageId)})
-        if not package:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Package not found",
-            )
-    except Exception as e:
-        logger.error(f"Error checking package: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid package ID",
-        )
-
-    # Validate preferred currency
-    allowed_currencies = ["NGN", "USD", "EUR", "GBP"]
-    preferred_currency = subscription.preferredCurrency or "NGN"
-    if preferred_currency not in allowed_currencies:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Currency must be one of {allowed_currencies}",
-        )
-
-    # Convert price to preferred currency if necessary
-    base_currency = "NGN"  # Assuming package price is stored in NGN
-    amount = package["price"]
-    if preferred_currency != base_currency:
-        try:
-            exchange_rate = await get_exchange_rate(base_currency, preferred_currency)
-            amount = round(package["price"] * exchange_rate, 2)
-        except HTTPException as e:
-            logger.error(f"Exchange rate conversion failed: {e}")
-            raise
-
-    # Initiate Flutterwave payment
-    tx_ref = f"sub_init_{subscription.userId}_{subscription.packageId}_{int(datetime.utcnow().timestamp())}"
-    payment_response = await initialize_flutterwave_payment(
-        email=current_user.email,
-        amount=amount,
-        currency=preferred_currency,
-        tx_ref=tx_ref,
-        country="NG"  # Adjust country if needed based on currency
-    )
-
-    # Log the full response for debugging
-    logger.info(f"Flutterwave payment response: {payment_response}")
-
-    # Check if response has expected structure
-    if payment_response.get("status") != "success" or "data" not in payment_response:
-        logger.error(f"Unexpected Flutterwave response: {payment_response}")
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Failed to initiate payment with Flutterwave",
-        )
-
-    # Extract transaction ID and payment link
-    data = payment_response["data"]
-    transaction_id = data.get("tx_ref") or data.get("transaction_id") or tx_ref
-    payment_link = data.get("link")
-
-    if not payment_link:
-        logger.error(f"No payment link in Flutterwave response: {payment_response}")
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Payment link not provided by Flutterwave",
-        )
-
-    # Store pending transaction with converted amount and currency
-    transaction = TransactionInDB(
-        tx_ref=tx_ref,
-        transactionId=transaction_id,
-        userId=subscription.userId,
-        packageId=subscription.packageId,
-        amount=amount,  # Store converted amount
-        currency=preferred_currency,  # Store preferred currency
-        preferredCurrency=preferred_currency,
-        status="pending",
-        createdAt=datetime.utcnow(),
-        updatedAt=datetime.utcnow()
-    )
-    db.transactions.insert_one(transaction.dict(by_alias=True))
-
-    return {"payment_url": payment_link}
-
-@app.post("/webhooks/flutterwave")
-async def handle_flutterwave_webhook(
-        payload: dict,
-        request: Request
-):
-    signature = request.headers.get("verif-hash")
-    if not signature or not verify_webhook_signature(await request.body(), signature):
-        raise HTTPException(status_code=401, detail="Invalid webhook signature")
-
-    event = payload.get("event")
-    data = payload.get("data")
-
-    if event == "charge.completed" and data["status"] == "successful":
-        transaction_id = str(data["id"])
-        tx_ref = data["tx_ref"]
-        transaction = db.transactions.find_one({"tx_ref": tx_ref, "transactionId": transaction_id})
-        if not transaction:
-            logger.error(f"Transaction not found for tx_ref: {tx_ref}, ID: {transaction_id}")
-            return {"status": "error"}
-
-        # Verify payment
-        verification = await verify_flutterwave_payment(transaction_id)
-        if verification["status"] == "success" and verification["data"]["status"] == "successful":
-            # Update transaction status
-            db.transactions.update_one(
-                {"tx_ref": tx_ref},
-                {"$set": {"status": "success", "updatedAt": datetime.utcnow()}}
-            )
-            logger.info(f"Payment verified for tx_ref: {tx_ref}")
-
-            # Create subscription
-            subscription = await create_subscription_from_transaction(transaction)
-            if subscription:
-                logger.info(f"Subscription created for tx_ref: {tx_ref}")
-            else:
-                logger.error(f"Failed to create subscription for tx_ref: {tx_ref}")
+        user = db.users.find_one({"email": booking_email})
+        if not user:
+            user_dict = {
+                "email": booking_email,
+                "firstName": booking_form.clientName.split(" ")[0],
+                "lastName": " ".join(booking_form.clientName.split(" ")[1:]) if len(
+                    booking_form.clientName.split(" ")) > 1 else "",
+                "phone": booking_form.phone,
+                "role": "user",
+                "createdAt": datetime.utcnow(),
+                "updatedAt": datetime.utcnow(),
+                "hashed_password": get_password_hash(str(uuid.uuid4()))
+            }
+            user_result = db.users.insert_one(user_dict)
+            user_id = str(user_result.inserted_id)
         else:
-            logger.error(f"Payment verification failed for tx_ref: {tx_ref}")
-            db.transactions.update_one(
-                {"tx_ref": tx_ref},
-                {"$set": {"status": "failed", "updatedAt": datetime.utcnow()}}
-            )
+            user_id = str(user["_id"])
 
-    return {"status": "success"}
+        # Determine booking type and details
+        service_name = ""
+        category_name = ""
+        booking_type = BookingType.CONSULTATION
+        payment_required = False
+        payment_amount = 0.0
 
-@app.get("/payment/callback")
-async def payment_callback(
-        status: str,
-        tx_ref: Optional[str] = None,
-        transaction_id: Optional[str] = None
-):
-    if status == "successful" and tx_ref:
-        transaction = db.transactions.find_one({"tx_ref": tx_ref})
-        if transaction and transaction["status"] == "success":
-            return {"message": "Payment successful. Subscription created."}
-        return {"message": "Payment received. Awaiting confirmation."}
-    elif status == "cancelled":
-        return {"message": "Payment cancelled. Please try again."}
-    else:
-        return {"message": "Payment failed. Please contact support."}
-
-
-@app.put("/subscriptions/{subscription_id}", response_model=Subscription)
-async def update_subscription(
-        subscription_id: str,
-        subscription_update: SubscriptionUpdate,
-        current_user: UserInDB = Depends(get_current_active_user)
-):
-    try:
-        subscription = db.subscriptions.find_one({"_id": ObjectId(subscription_id)})
-        if not subscription:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Subscription not found",
-            )
-
-        if current_user.role != "admin" and subscription["userId"] != str(current_user.id):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Not enough permissions",
-            )
-
-        update_data = subscription_update.dict(exclude_unset=True)
-        if update_data:
-            update_data["updatedAt"] = datetime.utcnow()
-            result = db.subscriptions.update_one(
-                {"_id": ObjectId(subscription_id)},
-                {"$set": update_data}
-            )
-
-            if result.modified_count == 0:
+        if booking_form.serviceId:
+            # Individual service booking
+            service = db.services.find_one({"_id": ObjectId(booking_form.serviceId)})
+            if not service:
                 raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Subscription update failed",
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Service not found"
                 )
 
-        updated_subscription = db.subscriptions.find_one({"_id": ObjectId(subscription_id)})
+            if not service["isAvailable"]:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Service is not available"
+                )
 
-        package = db.packages.find_one({"_id": ObjectId(updated_subscription["packageId"])})
-        package_obj = None
-        if package:
-            package_obj = Package(
-                id=str(package["_id"]),
-                name=package["name"],
-                description=package["description"],
-                price=package["price"],
-                duration=package["duration"],
-                features=package["features"],
-                image=package.get("image"),
-                type=package["type"],
-                isPopular=package["isPopular"],
-                createdAt=package["createdAt"],
-                updatedAt=package["updatedAt"]
-            )
+            category = db.service_categories.find_one({"_id": ObjectId(service["category_id"])})
+            if not category:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Service category not found"
+                )
 
-        if "status" in update_data:
-            user = get_user_by_id(updated_subscription["userId"])
-            if user:
-                status_update_html = f"""
-                <html>
-                    <body>
-                        <h1>Subscription Status Update</h1>
-                        <p>Dear {user.firstName},</p>
-                        <p>Your subscription to the {package["name"]} package has been updated to {updated_subscription["status"]}.</p>
-                        <p>Subscription Details:</p>
-                        <ul>
-                            <li>Package: {package["name"]}</li>
-                            <li>Start Date: {updated_subscription["startDate"].strftime("%Y-%m-%d")}</li>
-                            <li>End Date: {updated_subscription["endDate"].strftime("%Y-%m-%d")}</li>
-                            <li>Status: {updated_subscription["status"]}</li>
-                        </ul>
-                        <p>If you have any questions, please contact us.</p>
-                        <p>Best regards,<br>The Naija Concierge Team</p>
-                    </body>
-                </html>
-                """
-                send_email(user.email, "Subscription Status Update - Naija Concierge", status_update_html)
+            service_name = service["name"]
+            category_name = category["name"]
+            booking_type = BookingType.CONSULTATION
+            payment_required = False
+            payment_amount = 0.0
 
-            notification_message = f"""
-            Subscription status updated:
-            - Client: {user.firstName} {user.lastName}
-            - Package: {package["name"]}
-            - New Status: {updated_subscription["status"]}
-            """
-            send_admin_notification("Subscription Status Updated", notification_message)
+        elif booking_form.tierId:
+            # Tier booking
+            tier = db.service_tiers.find_one({"_id": ObjectId(booking_form.tierId)})
+            if not tier:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Service tier not found"
+                )
 
-        return Subscription(
-            id=str(updated_subscription["_id"]),
-            userId=updated_subscription["userId"],
-            packageId=updated_subscription["packageId"],
-            startDate=updated_subscription["startDate"],
-            endDate=updated_subscription["endDate"],
-            status=updated_subscription["status"],
-            createdAt=updated_subscription["createdAt"],
-            updatedAt=updated_subscription["updatedAt"],
-            package=package_obj
+            if not tier["is_available"]:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Service tier is not available"
+                )
+
+            category = db.service_categories.find_one({"_id": ObjectId(tier["category_id"])})
+            if not category:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Service category not found"
+                )
+
+            service_name = tier["name"]
+            category_name = category["name"]
+            booking_type = BookingType.TIER_BOOKING
+            payment_required = True
+            payment_amount = tier["price"]
+
+        booking_data = BookingInDB(
+            userId=user_id,
+            serviceId=booking_form.serviceId,
+            tierId=booking_form.tierId,
+            bookingDate=booking_form.bookingDate,
+            status="pending",
+            specialRequests=booking_form.specialRequests,
+            booking_type=booking_type,
+            payment_required=payment_required,
+            payment_amount=payment_amount
         )
-    except Exception as e:
-        logger.error(f"Error updating subscription: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Subscription update failed",
+        result = db.bookings.insert_one(booking_data.dict(by_alias=True))
+        created_booking = db.bookings.find_one({"_id": result.inserted_id})
+
+        airtable_data = {
+            "Booking ID": str(created_booking["_id"]),
+            "Client Name": booking_form.clientName,
+            "Service Requested": f"{service_name} ({category_name})",
+            "Booking Date": booking_form.bookingDate.strftime("%Y-%m-%d"),
+            "Booking Details": booking_form.specialRequests or "",
+            "Status": "Pending",
+            "Total Cost": float(payment_amount),
+            "Booking Type": booking_type,
+            "Payment Required": payment_required,
+            "Feedback": [],
+            "Subscription Plan": [],
+            "User": []
+        }
+        logger.info(f"Airtable data prepared: {airtable_data}")
+
+        airtable_response = add_to_airtable(airtable_data)
+        logger.info(f"Airtable response: {airtable_response}")
+
+        crm_client = CRMClientInDB(
+            clientName=booking_form.clientName,
+            contactInfo={"email": booking_email, "phone": booking_form.phone or ""},
+            serviceBooked=booking_form.serviceId or booking_form.tierId,
+            status="pending"
         )
+        db.crm_clients.insert_one(crm_client.dict(by_alias=True))
 
-@app.delete("/subscriptions/{subscription_id}")
-async def delete_subscription(
-        subscription_id: str,
-        current_user: UserInDB = Depends(get_admin_user)
-):
-    try:
-        subscription = db.subscriptions.find_one({"_id": ObjectId(subscription_id)})
-        if not subscription:
+        user_obj = get_user_by_id(user_id)
+        if not user_obj:
+            logger.error(f"User not found after creation: {user_id}")
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Subscription not found",
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="User creation failed"
             )
 
-        result = db.subscriptions.delete_one({"_id": ObjectId(subscription_id)})
-
-        if result.deleted_count == 0:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Subscription deletion failed",
-            )
-
-        package = db.packages.find_one({"_id": ObjectId(subscription["packageId"])})
-        user = get_user_by_id(subscription["userId"])
-        if user and package:
-            cancellation_html = f"""
+        # Send appropriate emails based on booking type
+        if booking_type == BookingType.CONSULTATION:
+            confirmation_html = f"""
             <html>
                 <body>
-                    <h1>Subscription Cancelled</h1>
-                    <p>Dear {user.firstName},</p>
-                    <p>Your subscription to the {package["name"]} package has been cancelled.</p>
-                    <p>If you have any questions or would like to reactivate, please contact us.</p>
+                    <h1>Service Request Received</h1>
+                    <p>Dear {booking_form.clientName},</p>
+                    <p>We have received your request for {service_name} from {category_name}.</p>
+                    <p>Our team will contact you within 24 hours to discuss your requirements and provide a custom quote.</p>
+                    <p>Booking Details:</p>
+                    <ul>
+                        <li>Service: {service_name}</li>
+                        <li>Category: {category_name}</li>
+                        <li>Date: {booking_form.bookingDate.strftime("%Y-%m-%d %H:%M")}</li>
+                        <li>Status: Pending</li>
+                    </ul>
                     <p>Best regards,<br>The Naija Concierge Team</p>
                 </body>
             </html>
             """
-            send_email(user.email, "Subscription Cancellation - Naija Concierge", cancellation_html)
+            notification_message = f"""
+            New service request:
+            - Client: {booking_form.clientName}
+            - Service: {service_name}
+            - Category: {category_name}
+            - Date: {booking_form.bookingDate.strftime("%Y-%m-%d %H:%M")}
+            - Email: {booking_email}
+            - Type: Contact Required
+            """
+        else:  # TIER_BOOKING
+            confirmation_html = f"""
+            <html>
+                <body>
+                    <h1>Tier Booking Confirmation - Payment Required</h1>
+                    <p>Dear {booking_form.clientName},</p>
+                    <p>Your booking for {service_name} from {category_name} has been received.</p>
+                    <p>To confirm your booking, please complete the payment of ₦{payment_amount}.</p>
+                    <p>Booking Details:</p>
+                    <ul>
+                        <li>Tier: {service_name}</li>
+                        <li>Category: {category_name}</li>
+                        <li>Date: {booking_form.bookingDate.strftime("%Y-%m-%d %H:%M")}</li>
+                        <li>Amount: ₦{payment_amount}</li>
+                        <li>Status: Pending Payment</li>
+                    </ul>
+                    <p>Best regards,<br>The Naija Concierge Team</p>
+                </body>
+            </html>
+            """
+            notification_message = f"""
+            New tier booking:
+            - Client: {booking_form.clientName}
+            - Tier: {service_name}
+            - Category: {category_name}
+            - Date: {booking_form.bookingDate.strftime("%Y-%m-%d %H:%M")}
+            - Email: {booking_email}
+            - Amount: ₦{payment_amount}
+            - Payment Required: Yes
+            """
 
-        return {"message": "Subscription deleted successfully"}
-    except Exception as e:
-        logger.error(f"Error deleting subscription: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Subscription deletion failed",
+        send_email(booking_email, "Booking Confirmation - Naija Concierge", confirmation_html)
+        send_admin_notification("New Booking Received", notification_message)
+
+        # Get service and tier objects for response
+        service_obj = None
+        tier_obj = None
+
+        if booking_form.serviceId:
+            service = db.services.find_one({"_id": ObjectId(booking_form.serviceId)})
+            if service:
+                service_obj = Service(
+                    id=str(service["_id"]),
+                    name=service["name"],
+                    description=service["description"],
+                    image=service.get("image"),
+                    duration=service["duration"],
+                    isAvailable=service["isAvailable"],
+                    features=service.get("features", []),
+                    requirements=service.get("requirements", []),
+                    category_id=service.get("category_id"),
+                    tier_id=service.get("tier_id"),
+                    createdAt=service["createdAt"],
+                    updatedAt=service["updatedAt"]
+                )
+
+        if booking_form.tierId:
+            tier = db.service_tiers.find_one({"_id": ObjectId(booking_form.tierId)})
+            if tier:
+                tier_obj = ServiceTier(
+                    id=str(tier["_id"]),
+                    name=tier["name"],
+                    description=tier["description"],
+                    price=tier["price"],
+                    category_id=tier["category_id"],
+                    image=tier.get("image"),
+                    features=tier.get("features", []),
+                    is_popular=tier.get("is_popular", False),
+                    is_available=tier.get("is_available", True),
+                    created_at=tier["created_at"],
+                    updated_at=tier["updated_at"],
+                    services=[]
+                )
+
+        return Booking(
+            id=str(created_booking["_id"]),
+            userId=created_booking["userId"],
+            serviceId=created_booking.get("serviceId"),
+            tierId=created_booking.get("tierId"),
+            bookingDate=created_booking["bookingDate"],
+            status=created_booking["status"],
+            specialRequests=created_booking.get("specialRequests"),
+            booking_type=created_booking["booking_type"],
+            contact_preference=created_booking.get("contact_preference"),
+            payment_required=created_booking["payment_required"],
+            payment_amount=created_booking.get("payment_amount"),
+            createdAt=created_booking["createdAt"],
+            updatedAt=created_booking["updatedAt"],
+            service=service_obj,
+            tier=tier_obj
         )
-
-
-
-# Content Endpoints
-
-@app.post("/content", response_model=Content)
-async def create_content(
-    page: str = Form(...),
-    section: str = Form(...),
-    content_type: str = Form(...),
-    text: Optional[str] = Form(None),
-    image_url: Optional[str] = Form(None),
-    metadata: Optional[str] = Form(None),
-    file: Optional[UploadFile] = File(None),
-    current_user: UserInDB = Depends(get_admin_user)
-):
-    """Create content with optimized field handling"""
-    try:
-        # Initialize with required fields
-        content_data = ContentInDB(
-            page=page,
-            section=section,
-            content_type=content_type,
-            created_by=str(current_user.id)
-        ).dict(by_alias=True)
-
-        # Handle text field
-        if text and text != "string":
-            content_data["text"] = parse_json_field(text, "text")
-
-        # Handle file/image_url
-        if file:
-            validate_image_file(file)
-            content_data["image_url"] = upload_to_cloudinary(
-                file,
-                f"content/{page}/{section}"
-            )
-        elif image_url and image_url != "string":
-            content_data["image_url"] = image_url
-
-        # Handle metadata
-        if metadata and metadata != "string":
-            content_data["metadata"] = parse_json_field(metadata, "metadata")
-
-        # Insert and return
-        result = db.content.insert_one(content_data)
-        created = db.content.find_one({"_id": result.inserted_id})
-        return convert_to_content_model(created)
-
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.error(f"Content creation error: {str(e)}", exc_info=True)
-        raise HTTPException(500, "Content creation failed")
-
-# Helper functions
-def parse_json_field(value: str, field_name: str) -> dict:
-    try:
-        return json.loads(value)
-    except json.JSONDecodeError:
-        raise HTTPException(400, f"{field_name} must be valid JSON")
-
-def validate_image_file(file: UploadFile):
-    if not file.content_type.startswith("image/"):
-        raise HTTPException(400, "Uploaded file must be an image")
-
-def upload_to_cloudinary(file: UploadFile, folder: str) -> str:
-    return upload_file_to_cloudinary(file, folder)
-
-def convert_to_content_model(doc: dict) -> Content:
-    return Content(
-        id=str(doc["_id"]),
-        page=doc["page"],
-        section=doc["section"],
-        content_type=doc["content_type"],
-        text=doc.get("text"),
-        image_url=doc.get("image_url"),
-        metadata=doc.get("metadata"),
-        created_by=doc["created_by"],
-        created_at=doc["created_at"],
-        updated_at=doc["updated_at"]
-    )
-
-@app.put("/content/{content_id}", response_model=Content)
-async def update_content(
-    content_id: str,
-    content_update: ContentUpdate,
-    file: Optional[UploadFile] = File(None),
-    current_user: UserInDB = Depends(get_admin_user)
-):
-    """
-    Update existing content by ID. Supports updating text, images, or both.
-    Only admins can update content.
-    """
-    try:
-        existing_content = db.content.find_one({"_id": ObjectId(content_id)})
-        if not existing_content:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Content not found"
-            )
-
-        update_data = content_update.dict(exclude_unset=True)
-        if file:
-            image_url = upload_file_to_cloudinary(file, folder=f"naija_concierge/{existing_content['page']}/{existing_content['section']}")
-            update_data["image_url"] = image_url
-
-        if update_data:
-            update_data["updated_at"] = datetime.utcnow()
-            db.content.update_one(
-                {"_id": ObjectId(content_id)},
-                {"$set": update_data}
-            )
-
-        updated_content = db.content.find_one({"_id": ObjectId(content_id)})
-        updated_content = serialize_object_id(updated_content)
-        return Content(**updated_content)
-    except Exception as e:
-        logger.error(f"Error updating content {content_id}: {e}")
+        logger.error(f"Error creating Airtable booking: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to update content"
-        )
-
-@app.get("/content", response_model=List[Content])
-async def get_content(
-    skip: int = 0,
-    limit: int = 100,
-    page: Optional[str] = None,
-    section: Optional[str] = None
-):
-    """Retrieve content with proper model conversion"""
-    try:
-        query = {}
-        if page:
-            query["page"] = page
-        if section:
-            query["section"] = section
-
-        contents = list(db.content.find(query).skip(skip).limit(limit))
-        return [
-            Content(
-                id=str(content["_id"]),
-                page=content["page"],
-                section=content["section"],
-                content_type=content["content_type"],
-                text=content.get("text"),
-                image_url=content.get("image_url"),
-                metadata=content.get("metadata"),
-                created_by=content["created_by"],
-                created_at=content["created_at"],
-                updated_at=content["updated_at"]
-            )
-            for content in contents
-        ]
-    except Exception as e:
-        logger.error(f"Error retrieving content: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to retrieve content"
-        )
-
-
-@app.get("/content/{content_id}", response_model=Content)
-async def get_content_by_id(content_id: str):
-    """
-    Retrieve specific content by ID.
-    Accessible to all users.
-    """
-    try:
-        content = db.content.find_one({"_id": ObjectId(content_id)})
-        if not content:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Content not found"
-            )
-        content = serialize_object_id(content)
-        return Content(**content)
-    except Exception as e:
-        logger.error(f"Error retrieving content {content_id}: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve content"
-        )
-
-@app.delete("/content/{content_id}", response_model=dict)
-async def delete_content(content_id: str, current_user: UserInDB = Depends(get_admin_user)):
-    """
-    Delete specific content by ID.
-    Only admins can delete content.
-    """
-    try:
-        result = db.content.delete_one({"_id": ObjectId(content_id)})
-        if result.deleted_count == 0:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Content not found"
-            )
-        return {"message": "Content deleted successfully"}
-    except Exception as e:
-        logger.error(f"Error deleting content {content_id}: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to delete content"
-        )
-
-
-
-# Blog routes
-
-@app.get("/blogs", response_model=List[Blog])
-async def get_blogs(
-        skip: int = 0,
-        limit: int = 100,
-        tag: Optional[str] = None
-):
-    query = {}
-    if tag:
-        query["tags"] = {"$in": [tag]}
-
-    blogs = list(db.blogs.find(query).skip(skip).limit(limit))
-    return [
-        Blog(
-            id=str(blog["_id"]),
-            title=blog["title"],
-            slug=blog["slug"],
-            content=blog["content"],
-            excerpt=blog["excerpt"],
-            coverImage=blog.get("coverImage"),
-            author=blog["author"],
-            tags=blog["tags"],
-            createdAt=blog["createdAt"],
-            updatedAt=blog["updatedAt"]
-        ) for blog in blogs
-    ]
-
-
-@app.get("/blogs/{blog_id}", response_model=Blog)
-async def get_blog(blog_id: str):
-    try:
-        blog = db.blogs.find_one({"_id": ObjectId(blog_id)})
-        if not blog:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Blog not found",
-            )
-
-        return Blog(
-            id=str(blog["_id"]),
-            title=blog["title"],
-            slug=blog["slug"],
-            content=blog["content"],
-            excerpt=blog["excerpt"],
-            coverImage=blog.get("coverImage"),
-            author=blog["author"],
-            tags=blog["tags"],
-            createdAt=blog["createdAt"],
-            updatedAt=blog["updatedAt"]
-        )
-    except Exception as e:
-        logger.error(f"Error getting blog: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Blog not found",
-        )
-
-@app.get("/blogs/blog/{slug}", response_model=Blog)
-async def get_blog_by_slug(slug: str):
-    blog = db.blogs.find_one({"slug": slug})
-    if not blog:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Blog not found",
-        )
-
-    return Blog(
-        id=str(blog["_id"]),
-        title=blog["title"],
-        slug=blog["slug"],
-        content=blog["content"],
-        excerpt=blog["excerpt"],
-        coverImage=blog.get("coverImage"),
-        author=blog["author"],
-        tags=blog["tags"],
-        createdAt=blog["createdAt"],
-        updatedAt=blog["updatedAt"]
-    )
-
-
-@app.post("/blogs", response_model=Blog)
-async def create_blog(
-        blog: BlogCreate,
-        current_user: UserInDB = Depends(get_admin_user)
-):
-    if not blog.title.strip() or not blog.slug.strip() or not blog.content.strip() or not blog.excerpt.strip():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Title, slug, content, and excerpt are required"
-        )
-    if not blog.author.get("name"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Author name is required"
-        )
-
-    existing_blog = db.blogs.find_one({"slug": blog.slug})
-    if existing_blog:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Blog with this slug already exists",
-        )
-
-    blog_in_db = BlogInDB(**blog.dict())
-    result = db.blogs.insert_one(blog_in_db.dict(by_alias=True))
-
-    created_blog = db.blogs.find_one({"_id": result.inserted_id})
-
-    return Blog(
-        id=str(created_blog["_id"]),
-        title=created_blog["title"],
-        slug=created_blog["slug"],
-        content=created_blog["content"],
-        excerpt=created_blog["excerpt"],
-        coverImage=created_blog.get("coverImage"),
-        author=created_blog["author"],
-        tags=created_blog["tags"],
-        createdAt=created_blog["createdAt"],
-        updatedAt=created_blog["updatedAt"]
-    )
-
-
-
-@app.put("/blogs/{blog_id}", response_model=Blog)
-async def update_blog(
-        blog_id: str,
-        blog_update: BlogUpdate,
-        current_user: UserInDB = Depends(get_admin_user)
-):
-    try:
-        blog = db.blogs.find_one({"_id": ObjectId(blog_id)})
-        if not blog:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Blog not found",
-            )
-
-        update_data = blog_update.dict(exclude_unset=True)
-        if update_data:
-            if "title" in update_data and not update_data["title"].strip():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Title cannot be empty"
-                )
-            if "slug" in update_data:
-                if not update_data["slug"].strip():
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="Slug cannot be empty"
-                    )
-                existing_blog = db.blogs.find_one({"slug": update_data["slug"], "_id": {"$ne": ObjectId(blog_id)}})
-                if existing_blog:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="Blog with this slug already exists",
-                    )
-            if "content" in update_data and not update_data["content"].strip():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Content cannot be empty"
-                )
-            if "excerpt" in update_data and not update_data["excerpt"].strip():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Excerpt cannot be empty"
-                )
-            if "author" in update_data and not update_data["author"].get("name"):
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Author name is required"
-                )
-
-            update_data["updatedAt"] = datetime.utcnow()
-            result = db.blogs.update_one(
-                {"_id": ObjectId(blog_id)},
-                {"$set": update_data}
-            )
-
-            if result.modified_count == 0:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Blog update failed",
-                )
-
-        updated_blog = db.blogs.find_one({"_id": ObjectId(blog_id)})
-
-        return Blog(
-            id=str(updated_blog["_id"]),
-            title=updated_blog["title"],
-            slug=updated_blog["slug"],
-            content=updated_blog["content"],
-            excerpt=updated_blog["excerpt"],
-            coverImage=updated_blog.get("coverImage"),
-            author=updated_blog["author"],
-            tags=updated_blog["tags"],
-            createdAt=updated_blog["createdAt"],
-            updatedAt=updated_blog["updatedAt"]
-        )
-    except Exception as e:
-        logger.error(f"Error updating blog: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Blog update failed",
-        )
-
-@app.delete("/blogs/{blog_id}")
-async def delete_blog(
-        blog_id: str,
-        current_user: UserInDB = Depends(get_admin_user)
-):
-    try:
-        # Check if blog exists
-        blog = db.blogs.find_one({"_id": ObjectId(blog_id)})
-        if not blog:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Blog not found",
-            )
-
-        # Delete blog
-        result = db.blogs.delete_one({"_id": ObjectId(blog_id)})
-
-        if result.deleted_count == 0:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Blog deletion failed",
-            )
-
-        return {"message": "Blog deleted successfully"}
-    except Exception as e:
-        logger.error(f"Error deleting blog: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Blog deletion failed",
-        )
-
-
-@app.post("/blogs/image")
-async def upload_blog_image(
-        file: UploadFile = File(...),
-        current_user: UserInDB = Depends(get_admin_user)
-):
-    if not file.content_type.startswith("image/"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="File must be an image"
-        )
-
-    # Upload to Cloudinary
-    image_url = upload_file_to_cloudinary(file, folder="naija_concierge/blogs")
-
-    return {"imageUrl": image_url}
-
-
-# Emergency Alert routes
-@app.get("/emergency-alerts", response_model=List[EmergencyAlert])
-async def get_emergency_alerts(
-        skip: int = 0,
-        limit: int = 100,
-        status: Optional[str] = None,
-        current_user: UserInDB = Depends(get_current_active_user)
-):
-    query = {}
-
-    # Regular users can only see their own alerts
-    if current_user.role != "admin":
-        query["userId"] = str(current_user.id)
-
-    if status:
-        query["status"] = status
-
-    alerts = list(db.emergency_alerts.find(query).skip(skip).limit(limit))
-    return [
-        EmergencyAlert(
-            id=str(alert["_id"]),
-            userId=alert["userId"],
-            message=alert["message"],
-            location=alert.get("location"),
-            status=alert["status"],
-            createdAt=alert["createdAt"],
-            updatedAt=alert["updatedAt"]
-        ) for alert in alerts
-    ]
-
-
-@app.post("/emergency-alerts", response_model=EmergencyAlert)
-async def create_emergency_alert(
-        alert: EmergencyAlertCreate,
-        current_user: UserInDB = Depends(get_current_active_user)
-):
-    if not alert.message.strip():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Message is required"
-        )
-
-    if alert.userId != str(current_user.id) and current_user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not enough permissions",
-        )
-
-    alert_in_db = EmergencyAlertInDB(**alert.dict())
-    result = db.emergency_alerts.insert_one(alert_in_db.dict(by_alias=True))
-
-    created_alert = db.emergency_alerts.find_one({"_id": result.inserted_id})
-
-    user = get_user_by_id(alert.userId)
-    if user:
-        alert_html = f"""
-        <html>
-            <body>
-                <h1>Emergency Alert Received</h1>
-                <p>Dear {user.firstName},</p>
-                <p>We have received your emergency alert: {alert.message}</p>
-                <p>Our team is responding and will contact you shortly.</p>
-                <p>Best regards,<br>The Naija Concierge Team</p>
-            </body>
-        </html>
-        """
-        send_email(user.email, "Emergency Alert - Naija Concierge", alert_html)
-
-    notification_message = f"""
-    New emergency alert:
-    - Client: {user.firstName} {user.lastName}
-    - Message: {alert.message}
-    - Location: {alert.location or "Not provided"}
-    - Status: {created_alert["status"]}
-    """
-    send_admin_notification("New Emergency Alert", notification_message)
-
-    return EmergencyAlert(
-        id=str(created_alert["_id"]),
-        userId=created_alert["userId"],
-        message=created_alert["message"],
-        location=created_alert.get("location"),
-        status=created_alert["status"],
-        createdAt=created_alert["createdAt"],
-        updatedAt=created_alert["updatedAt"]
-    )
-
-
-
-@app.put("/emergency-alerts/{alert_id}", response_model=EmergencyAlert)
-async def update_emergency_alert(
-        alert_id: str,
-        alert_update: EmergencyAlertUpdate,
-        current_user: UserInDB = Depends(get_admin_user)
-):
-    try:
-        alert = db.emergency_alerts.find_one({"_id": ObjectId(alert_id)})
-        if not alert:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Emergency alert not found",
-            )
-
-        update_data = alert_update.dict(exclude_unset=True)
-        if update_data:
-            if "message" in update_data and not update_data["message"].strip():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Message cannot be empty"
-                )
-
-            update_data["updatedAt"] = datetime.utcnow()
-            result = db.emergency_alerts.update_one(
-                {"_id": ObjectId(alert_id)},
-                {"$set": update_data}
-            )
-
-            if result.modified_count == 0:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Emergency alert update failed",
-                )
-
-        updated_alert = db.emergency_alerts.find_one({"_id": ObjectId(alert_id)})
-
-        if "status" in update_data:
-            user = get_user_by_id(updated_alert["userId"])
-            if user:
-                status_update_html = f"""
-                <html>
-                    <body>
-                        <h1>Emergency Alert Status Update</h1>
-                        <p>Dear {user.firstName},</p>
-                        <p>Your emergency alert has been updated to {updated_alert["status"]}.</p>
-                        <p>Message: {updated_alert["message"]}</p>
-                        <p>If you need further assistance, please contact us.</p>
-                        <p>Best regards,<br>The Naija Concierge Team</p>
-                    </body>
-                </html>
-                """
-                send_email(user.email, "Emergency Alert Status Update - Naija Concierge", status_update_html)
-
-        return EmergencyAlert(
-            id=str(updated_alert["_id"]),
-            userId=updated_alert["userId"],
-            message=updated_alert["message"],
-            location=updated_alert.get("location"),
-            status=updated_alert["status"],
-            createdAt=updated_alert["createdAt"],
-            updatedAt=updated_alert["updatedAt"]
-        )
-    except Exception as e:
-        logger.error(f"Error updating emergency alert: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Emergency alert update failed",
+            detail=f"Failed to create booking: {str(e)}"
         )
 
 
 # Contact routes
-# @app.post("/contact")
-# async def send_contact_message(message: ContactMessage):
-#     try:
-#         # Store message in database
-#         message_dict = message.dict()
-#         message_dict["createdAt"] = datetime.utcnow()
-#         db.contact_messages.insert_one(message_dict)
-#
-#         # Send notification email to admin
-#         admin_users = list(db.users.find({"role": "admin"}))
-#         for admin in admin_users:
-#             contact_html = f"""
-#             <html>
-#                 <body>
-#                     <h1>New Contact Message</h1>
-#                     <p><strong>Name:</strong> {message.name}</p>
-#                     <p><strong>Email:</strong> {message.email}</p>
-#                     <p><strong>Phone:</strong> {message.phone or "Not provided"}</p>
-#                     <p><strong>Subject:</strong> {message.subject}</p>
-#                     <p><strong>Message:</strong></p>
-#                     <p>{message.message}</p>
-#                 </body>
-#             </html>
-#             """
-#             send_email(admin["email"], f"New Contact Message: {message.subject}", contact_html)
-#
-#         # Send confirmation email to user
-#         confirmation_html = f"""
-#         <html>
-#             <body>
-#                 <h1>Thank You for Contacting Us</h1>
-#                 <p>Dear {message.name},</p>
-#                 <p>We have received your message and will get back to you shortly.</p>
-#                 <p><strong>Subject:</strong> {message.subject}</p>
-#                 <p><strong>Message:</strong></p>
-#                 <p>{message.message}</p>
-#                 <p>Best regards,<br>The Naija Concierge Team</p>
-#             </body>
-#         </html>
-#         """
-#         send_email(message.email, "Thank You for Contacting Naija Concierge", confirmation_html)
-#
-#         return {"message": "Contact message sent successfully"}
-#     except Exception as e:
-#         logger.error(f"Error sending contact message: {e}")
-#         raise HTTPException(
-#             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-#             detail="Failed to send contact message",
-#         )
-
-
 @app.post("/contact")
 async def send_contact_message(message: ContactMessage):
     try:
@@ -4503,6 +2794,7 @@ async def send_contact_message(message: ContactMessage):
         - Name: {message.name}
         - Email: {message.email}
         - Subject: {message.subject}
+        - Message: {message.message[:100]}...
         """
         send_admin_notification("New Contact Message", notification_message)
 
@@ -4511,476 +2803,50 @@ async def send_contact_message(message: ContactMessage):
         logger.error(f"Error sending contact message: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to send contact message",
+            detail="Failed to send contact message"
         )
 
 
-@app.post("/webhooks/booking-notification")
-async def booking_notification_webhook(data: Dict[str, Any]):
+# Newsletter subscription
+@app.post("/newsletter/subscribe")
+async def subscribe_to_newsletter(email: EmailStr):
     try:
-        booking_id = data.get("bookingId")
-        if not booking_id:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Booking ID required"
-            )
-
-        booking = db.bookings.find_one({"_id": ObjectId(booking_id)})
-        if not booking:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Booking not found"
-            )
-
-        service = db.services.find_one({"_id": ObjectId(booking["serviceId"])})
-        user = db.users.find_one({"_id": ObjectId(booking["userId"])})
-
-        if not service or not user:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Service or user not found"
-            )
-
-        notification_message = f"""
-        New Booking:
-        - Client: {user["firstName"]} {user["lastName"]}
-        - Service: {service["name"]}
-        - Date: {booking["bookingDate"].strftime("%Y-%m-%d %H:%M")}
-        - Status: {booking["status"]}
-        """
-
-        send_admin_notification("New Booking Notification", notification_message)
-
-        return {"message": "Notification processed successfully"}
-    except Exception as e:
-        logger.error(f"Error processing webhook: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to process webhook"
-        )
-
-
-# Document routes
-@app.get("/documents", response_model=List[Document])
-async def get_documents(
-        current_user: UserInDB = Depends(get_current_active_user)
-):
-    query = {}
-
-    # Regular users can only see their own documents
-    if current_user.role != "admin":
-        query["userId"] = str(current_user.id)
-
-    documents = list(db.documents.find(query))
-    return [
-        Document(
-            id=str(doc["_id"]),
-            userId=doc["userId"],
-            name=doc["name"],
-            type=doc["type"],
-            url=doc["url"],
-            uploadDate=doc["uploadDate"]
-        ) for doc in documents
-    ]
-
-
-@app.post("/documents", response_model=Document)
-async def create_document(
-        name: str = Form(...),
-        type: str = Form(...),
-        file: UploadFile = File(...),
-        current_user: UserInDB = Depends(get_current_active_user)
-):
-    if not name.strip():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Document name is required"
-        )
-    if not type.strip():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Document type is required"
-        )
-
-    file_url = upload_file_to_cloudinary(file, folder="naija_concierge/documents")
-
-    document_in_db = DocumentInDB(
-        userId=str(current_user.id),
-        name=name,
-        type=type,
-        url=file_url
-    )
-    result = db.documents.insert_one(document_in_db.dict(by_alias=True))
-
-    created_document = db.documents.find_one({"_id": result.inserted_id})
-
-    notification_message = f"""
-    New document uploaded:
-    - Client: {current_user.firstName} {current_user.lastName}
-    - Document: {name}
-    - Type: {type}
-    """
-    send_admin_notification("New Document Uploaded", notification_message)
-
-    return Document(
-        id=str(created_document["_id"]),
-        userId=created_document["userId"],
-        name=created_document["name"],
-        type=created_document["type"],
-        url=created_document["url"],
-        uploadDate=created_document["uploadDate"]
-    )
-
-@app.delete("/documents/{document_id}")
-async def delete_document(
-        document_id: str,
-        current_user: UserInDB = Depends(get_current_active_user)
-):
-    try:
-        document = db.documents.find_one({"_id": ObjectId(document_id)})
-        if not document:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Document not found",
-            )
-
-        if current_user.role != "admin" and document["userId"] != str(current_user.id):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Not enough permissions",
-            )
-
-        result = db.documents.delete_one({"_id": ObjectId(document_id)})
-
-        if result.deleted_count == 0:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Document deletion failed",
-            )
-
-        return {"message": "Document deleted successfully"}
-    except Exception as e:
-        logger.error(f"Error deleting document: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Document deletion failed",
-        )
-
-
-# Admin dashboard stats
-@app.get("/admin/stats")
-async def get_admin_stats(current_user: UserInDB = Depends(get_admin_user)):
-    try:
-        # Get total users
-        total_users = db.users.count_documents({})
-
-        # Get total bookings
-        total_bookings = db.bookings.count_documents({})
-
-        # Get total revenue
-        bookings = list(db.bookings.find({"status": {"$in": ["confirmed", "completed"]}}))
-        total_revenue = 0
-        for booking in bookings:
-            try:
-                service = db.services.find_one({"_id": ObjectId(booking["serviceId"])})
-                if service:
-                    total_revenue += service["price"]
-            except Exception:
-                pass
-
-        # Get active packages
-        active_packages = db.subscriptions.count_documents({"status": "active"})
-
-        # Get user growth (last 30 days)
-        thirty_days_ago = datetime.utcnow() - timedelta(days=30)
-        new_users = db.users.count_documents({"createdAt": {"$gte": thirty_days_ago}})
-        user_growth = (new_users / total_users) * 100 if total_users > 0 else 0
-
-        # Get booking growth (last 30 days)
-        new_bookings = db.bookings.count_documents({"createdAt": {"$gte": thirty_days_ago}})
-        booking_growth = (new_bookings / total_bookings) * 100 if total_bookings > 0 else 0
-
-        # Get revenue growth (compare last 30 days with previous 30 days)
-        last_30_days_bookings = list(db.bookings.find({
-            "createdAt": {"$gte": thirty_days_ago},
-            "status": {"$in": ["confirmed", "completed"]}
-        }))
-        last_30_days_revenue = 0
-        for booking in last_30_days_bookings:
-            try:
-                service = db.services.find_one({"_id": ObjectId(booking["serviceId"])})
-                if service:
-                    last_30_days_revenue += service["price"]
-            except Exception:
-                pass
-
-        previous_30_days_start = thirty_days_ago - timedelta(days=30)
-        previous_30_days_bookings = list(db.bookings.find({
-            "createdAt": {"$gte": previous_30_days_start, "$lt": thirty_days_ago},
-            "status": {"$in": ["confirmed", "completed"]}
-        }))
-        previous_30_days_revenue = 0
-        for booking in previous_30_days_bookings:
-            try:
-                service = db.services.find_one({"_id": ObjectId(booking["serviceId"])})
-                if service:
-                    previous_30_days_revenue += service["price"]
-            except Exception:
-                pass
-
-        revenue_growth = ((
-                                      last_30_days_revenue - previous_30_days_revenue) / previous_30_days_revenue) * 100 if previous_30_days_revenue > 0 else 0
-
-        # Get package growth (compare active packages with previous month)
-        current_active_packages = db.subscriptions.count_documents({
-            "status": "active",
-            "startDate": {"$gte": thirty_days_ago}
-        })
-        previous_active_packages = db.subscriptions.count_documents({
-            "status": "active",
-            "startDate": {"$gte": previous_30_days_start, "$lt": thirty_days_ago}
-        })
-        package_growth = ((
-                                      current_active_packages - previous_active_packages) / previous_active_packages) * 100 if previous_active_packages > 0 else 0
-
-        return {
-            "totalUsers": total_users,
-            "totalBookings": total_bookings,
-            "totalRevenue": total_revenue,
-            "activePackages": active_packages,
-            "userGrowth": round(user_growth, 1),
-            "bookingGrowth": round(booking_growth, 1),
-            "revenueGrowth": round(revenue_growth, 1),
-            "packageGrowth": round(package_growth, 1)
-        }
-    except Exception as e:
-        logger.error(f"Error getting admin stats: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to get admin stats",
-        )
-
-
-
-
-@app.get("/analytics/chart-data", response_model=ChartDataResponse)
-async def get_chart_data(timeframe: Timeframe = Timeframe.weekly):
-    try:
-        if timeframe == Timeframe.weekly:
-            # Get data for the last 7 days
-            end_date = datetime.utcnow()
-            start_date = end_date - timedelta(days=7)
-
-            # Generate day names for the past 7 days
-            days = [(start_date + timedelta(days=i)).strftime("%a") for i in range(7)]
-
-            booking_data = []
-            revenue_data = []
-
-            for i, day in enumerate(days):
-                day_start = start_date + timedelta(days=i)
-                day_end = day_start + timedelta(days=1)
-
-                # Count bookings for the day
-                total_bookings = db.bookings.count_documents({
-                    "bookingDate": {"$gte": day_start, "$lt": day_end}
-                })
-
-                # Count completed bookings for the day
-                completed_bookings = db.bookings.count_documents({
-                    "bookingDate": {"$gte": day_start, "$lt": day_end},
-                    "status": "completed"
-                })
-
-                # Calculate revenue for the day
-                day_bookings = db.bookings.find({
-                    "bookingDate": {"$gte": day_start, "$lt": day_end},
-                    "status": {"$in": ["confirmed", "completed"]}
-                })
-
-                day_revenue = 0
-                for booking in day_bookings:
-                    service = db.services.find_one({"_id": ObjectId(booking["serviceId"])})
-                    if service:
-                        day_revenue += service["price"]
-
-                booking_data.append({
-                    "name": day,
-                    "bookings": total_bookings,
-                    "completed": completed_bookings
-                })
-
-                revenue_data.append({
-                    "name": day,
-                    "revenue": day_revenue
-                })
-
-        else:  # Monthly timeframe
-            # Get data for the last 4 weeks
-            end_date = datetime.utcnow()
-            start_date = end_date - timedelta(weeks=4)
-
-            booking_data = []
-            revenue_data = []
-
-            for week in range(4):
-                week_start = start_date + timedelta(weeks=week)
-                week_end = week_start + timedelta(weeks=1)
-
-                # Count bookings for the week
-                total_bookings = db.bookings.count_documents({
-                    "bookingDate": {"$gte": week_start, "$lt": week_end}
-                })
-
-                # Count completed bookings for the week
-                completed_bookings = db.bookings.count_documents({
-                    "bookingDate": {"$gte": week_start, "$lt": week_end},
-                    "status": "completed"
-                })
-
-                # Calculate revenue for the week
-                week_bookings = db.bookings.find({
-                    "bookingDate": {"$gte": week_start, "$lt": week_end},
-                    "status": {"$in": ["confirmed", "completed"]}
-                })
-
-                week_revenue = 0
-                for booking in week_bookings:
-                    service = db.services.find_one({"_id": ObjectId(booking["serviceId"])})
-                    if service:
-                        week_revenue += service["price"]
-
-                booking_data.append({
-                    "name": f"Week {week + 1}",
-                    "bookings": total_bookings,
-                    "completed": completed_bookings
-                })
-
-                revenue_data.append({
-                    "name": f"Week {week + 1}",
-                    "revenue": week_revenue
-                })
-
-        return {
-            "bookingData": booking_data,
-            "revenueData": revenue_data
-        }
-
-    except Exception as e:
-        logger.error(f"Error fetching chart data: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to fetch chart data"
-        )
-
-
-@app.post("/newsletter/subscribe", status_code=status.HTTP_201_CREATED)
-async def subscribe_to_newsletter(
-        email: EmailStr = Form(...),
-):
-    """
-    Subscribe to the newsletter (no email verification)
-    """
-    try:
-        # Check if already subscribed
-        existing_subscriber = db.newsletter_subscribers.find_one({
-            "email": email,
-            "is_active": True
-        })
-
+        existing_subscriber = db.newsletter_subscribers.find_one({"email": email})
         if existing_subscriber:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="This email is already subscribed"
-            )
+            if existing_subscriber["is_active"]:
+                return {"message": "Email is already subscribed to the newsletter"}
+            else:
+                db.newsletter_subscribers.update_one(
+                    {"email": email},
+                    {"$set": {"is_active": True, "subscribed_at": datetime.utcnow()}}
+                )
+                return {"message": "Newsletter subscription reactivated successfully"}
 
-        # Create new subscriber
         subscriber = NewsletterSubscriberInDB(email=email)
+        db.newsletter_subscribers.insert_one(subscriber.dict(by_alias=True))
 
-        result = db.newsletter_subscribers.insert_one(subscriber.dict(by_alias=True))
-
-        # Send confirmation email
-        confirmation_html = f"""
+        welcome_html = f"""
         <html>
             <body>
-                <h1>Thanks for Subscribing!</h1>
-                <p>You've been successfully subscribed to our newsletter.</p>
-                <p>You'll receive updates and news from Naija Concierge.</p>
-                <p>To unsubscribe at any time, visit our website.</p>
+                <h1>Welcome to Naija Concierge Newsletter!</h1>
+                <p>Thank you for subscribing to our newsletter.</p>
+                <p>You'll receive updates about our latest services, special offers, and Lagos lifestyle tips.</p>
                 <p>Best regards,<br>The Naija Concierge Team</p>
             </body>
         </html>
         """
-
-        send_email(
-            email,
-            "Thanks for Subscribing - Naija Concierge",
-            confirmation_html
-        )
+        send_email(email, "Welcome to Naija Concierge Newsletter", welcome_html)
 
         return {"message": "Successfully subscribed to newsletter"}
-
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"Error subscribing to newsletter: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to process subscription"
+            detail="Failed to subscribe to newsletter"
         )
 
 
-@app.post("/newsletter/unsubscribe")
-async def unsubscribe_from_newsletter(
-        email: EmailStr = Form(...)
-):
-    """
-    Unsubscribe from the newsletter
-    """
-    try:
-        result = db.newsletter_subscribers.update_one(
-            {"email": email, "is_active": True},
-            {"$set": {"is_active": False}}
-        )
-
-        if result.modified_count == 0:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Email not found in active subscriptions"
-            )
-
-        # Send confirmation email
-        confirmation_html = f"""
-        <html>
-            <body>
-                <h1>You're Unsubscribed</h1>
-                <p>You've been successfully unsubscribed from our newsletter.</p>
-                <p>We're sorry to see you go. You can resubscribe anytime.</p>
-                <p>Best regards,<br>The Naija Concierge Team</p>
-            </body>
-        </html>
-        """
-
-        send_email(
-            email,
-            "You're Unsubscribed - Naija Concierge",
-            confirmation_html
-        )
-
-        return {"message": "Successfully unsubscribed"}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error unsubscribing from newsletter: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to process unsubscribe request"
-        )
-
-
-# Run the application
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
