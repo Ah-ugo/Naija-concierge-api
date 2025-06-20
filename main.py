@@ -29,6 +29,7 @@ from pymongo.collection import Collection
 import json
 import hmac
 import hashlib
+import httpx
 
 # Configure logging
 logging.basicConfig(
@@ -81,7 +82,10 @@ AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME")
 FLUTTERWAVE_SECRET_KEY = os.getenv("FLUTTERWAVE_SECRET_KEY")
 FLUTTERWAVE_BASE_URL = "https://api.flutterwave.com/v3"
 FLUTTERWAVE_SECRET_HASH = os.getenv("FLUTTERWAVE_SECRET_HASH")
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://sorted-concierge.vercel.app/")
+
+EXCHANGE_RATE_API_KEY = os.getenv("EXCHANGE_RATE_API_KEY")
+EXCHANGE_RATE_BASE_URL = "https://v6.exchangerate-api.com/v6"
 
 # JWT configuration
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key")
@@ -551,12 +555,114 @@ class AirtableBookingForm(BaseModel):
     specialRequests: Optional[str] = None
 
 
+class BlogBase(BaseModel):
+    title: str
+    slug: str
+    content: str
+    excerpt: str
+    coverImage: Optional[str] = None
+    author: Dict[str, str]
+    tags: List[str]
+
+
+class BlogCreate(BlogBase):
+    pass
+
+
+class BlogUpdate(BaseModel):
+    title: Optional[str] = None
+    slug: Optional[str] = None
+    content: Optional[str] = None
+    excerpt: Optional[str] = None
+    coverImage: Optional[str] = None
+    author: Optional[Dict[str, str]] = None
+    tags: Optional[List[str]] = None
+
+
+class BlogInDB(BlogBase):
+    id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
+    createdAt: datetime = Field(default_factory=datetime.utcnow)
+    updatedAt: datetime = Field(default_factory=datetime.utcnow)
+
+    class Config:
+        allow_population_by_field_name = True
+        arbitrary_types_allowed = True
+        json_encoders = {ObjectId: str}
+
+
+class Blog(BlogBase):
+    id: str
+    createdAt: datetime
+    updatedAt: datetime
+
+    class Config:
+        orm_mode = True
+
+
+class EmergencyAlertBase(BaseModel):
+    userId: str
+    message: str
+    location: Optional[str] = None
+    status: str = "pending"
+
+
+class EmergencyAlertCreate(EmergencyAlertBase):
+    pass
+
+
+class EmergencyAlertUpdate(BaseModel):
+    message: Optional[str] = None
+    location: Optional[str] = None
+    status: Optional[str] = None
+
+
+class EmergencyAlertInDB(EmergencyAlertBase):
+    id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
+    createdAt: datetime = Field(default_factory=datetime.utcnow)
+    updatedAt: datetime = Field(default_factory=datetime.utcnow)
+
+    class Config:
+        allow_population_by_field_name = True
+        arbitrary_types_allowed = True
+        json_encoders = {ObjectId: str}
+
+
+class EmergencyAlert(EmergencyAlertBase):
+    id: str
+    createdAt: datetime
+    updatedAt: datetime
+
+    class Config:
+        orm_mode = True
+
+
+
 class ContactMessage(BaseModel):
     name: str
     email: EmailStr
     phone: Optional[str] = None
     subject: str
     message: str
+
+
+
+class BookingDataPoint(BaseModel):
+    name: str
+    bookings: int
+    completed: int
+
+class RevenueDataPoint(BaseModel):
+    name: str
+    revenue: float
+
+class ChartDataResponse(BaseModel):
+    bookingData: List[BookingDataPoint]
+    revenueData: List[RevenueDataPoint]
+
+
+class Timeframe(str, Enum):
+    weekly = "weekly"
+    monthly = "monthly"
 
 
 class NewsletterSubscriber(BaseModel):
@@ -600,6 +706,48 @@ class FlutterwaveWebhookData(BaseModel):
 class FlutterwaveWebhook(BaseModel):
     event: str
     data: FlutterwaveWebhookData
+
+
+
+class GalleryImageBase(BaseModel):
+    title: str
+    description: Optional[str] = None
+    category: str
+    tags: List[str] = []
+
+class GalleryImageCreate(GalleryImageBase):
+    pass
+
+class GalleryImageUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    category: Optional[str] = None
+    tags: Optional[List[str]] = None
+
+
+class GalleryImageInDB(GalleryImageBase):
+    id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
+    image_url: str
+    created_by: str  # User ID
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    class Config:
+        allow_population_by_field_name = True
+        arbitrary_types_allowed = True
+        json_encoders = {ObjectId: str}
+
+class GalleryImage(GalleryImageBase):
+    id: str
+    image_url: str
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        orm_mode = True
+
+
 
 
 # Helper functions
@@ -820,8 +968,88 @@ def add_to_airtable(booking_data: Dict) -> Dict:
 
 
 # Flutterwave Payment Integration Functions
-def generate_flutterwave_payment_url(booking_data: Dict, user_data: Dict, amount: float) -> str:
-    """Generate Flutterwave payment URL for tier bookings"""
+# def generate_flutterwave_payment_url(booking_data: Dict, user_data: Dict, amount: float) -> str:
+#     """Generate Flutterwave payment URL for tier bookings"""
+#     if not FLUTTERWAVE_SECRET_KEY:
+#         logger.error("Flutterwave secret key not configured")
+#         raise HTTPException(
+#             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+#             detail="Payment service not configured"
+#         )
+#
+#     try:
+#         # Generate unique transaction reference
+#         tx_ref = f"booking_{booking_data['id']}_{uuid.uuid4().hex[:8]}"
+#
+#         # Flutterwave payment payload
+#         payment_payload = {
+#             "tx_ref": tx_ref,
+#             "amount": amount,
+#             "currency": "NGN",
+#             "redirect_url": f"{FRONTEND_URL}/booking/confirmation",
+#             "payment_options": "card,banktransfer,ussd",
+#             "customer": {
+#                 "email": user_data["email"],
+#                 "phonenumber": user_data.get("phone", ""),
+#                 "name": f"{user_data['firstName']} {user_data['lastName']}"
+#             },
+#             "customizations": {
+#                 "title": "Naija Concierge - Tier Booking",
+#                 "description": f"Payment for tier booking",
+#                 "logo": "https://your-logo-url.com/logo.png"
+#             },
+#             "meta": {
+#                 "booking_id": str(booking_data["id"]),
+#                 "user_id": user_data["id"],
+#                 "booking_type": "tier_booking"
+#             }
+#         }
+#
+#         headers = {
+#             "Authorization": f"Bearer {FLUTTERWAVE_SECRET_KEY}",
+#             "Content-Type": "application/json"
+#         }
+#
+#         response = requests.post(
+#             f"{FLUTTERWAVE_BASE_URL}/payments",
+#             json=payment_payload,
+#             headers=headers
+#         )
+#         response.raise_for_status()
+#
+#         payment_data = response.json()
+#         if payment_data["status"] == "success":
+#             # Update booking with transaction reference
+#             db.bookings.update_one(
+#                 {"_id": ObjectId(booking_data["id"])},
+#                 {"$set": {"flutterwave_tx_ref": tx_ref}}
+#             )
+#             return payment_data["data"]["link"]
+#         else:
+#             logger.error(f"Payment URL generation failed: {payment_data}")
+#             raise Exception(f"Payment URL generation failed: {payment_data}")
+#
+#     except requests.exceptions.RequestException as e:
+#         logger.error(f"Flutterwave API request error: {e}")
+#         raise HTTPException(
+#             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+#             detail="Failed to generate payment URL"
+#         )
+#     except Exception as e:
+#         logger.error(f"Flutterwave payment URL generation error: {e}")
+#         raise HTTPException(
+#             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+#             detail="Failed to generate payment URL"
+#         )
+#
+
+def generate_flutterwave_payment_url(
+    booking_data: Dict,
+    user_data: Dict,
+    amount: float,
+    currency: str = "NGN"
+) -> str:
+    """Generate Flutterwave payment URL with proper currency support"""
     if not FLUTTERWAVE_SECRET_KEY:
         logger.error("Flutterwave secret key not configured")
         raise HTTPException(
@@ -833,13 +1061,21 @@ def generate_flutterwave_payment_url(booking_data: Dict, user_data: Dict, amount
         # Generate unique transaction reference
         tx_ref = f"booking_{booking_data['id']}_{uuid.uuid4().hex[:8]}"
 
-        # Flutterwave payment payload
+        # Ensure amount is properly formatted for the currency
+        if currency == "NGN":
+            # NGN amounts should be whole numbers
+            formatted_amount = int(amount)
+        else:
+            # Other currencies can have decimals
+            formatted_amount = round(amount, 2)
+
+        # Flutterwave payment payload with proper currency handling
         payment_payload = {
             "tx_ref": tx_ref,
-            "amount": amount,
-            "currency": "NGN",
-            "redirect_url": f"{FRONTEND_URL}/booking/payment-success",
-            "payment_options": "card,banktransfer,ussd",
+            "amount": formatted_amount,
+            "currency": currency,
+            "redirect_url": f"{FRONTEND_URL}/booking/payment-success?tx_ref={tx_ref}",
+            "payment_options": "card,banktransfer,ussd" if currency == "NGN" else "card",
             "customer": {
                 "email": user_data["email"],
                 "phonenumber": user_data.get("phone", ""),
@@ -847,13 +1083,16 @@ def generate_flutterwave_payment_url(booking_data: Dict, user_data: Dict, amount
             },
             "customizations": {
                 "title": "Naija Concierge - Tier Booking",
-                "description": f"Payment for tier booking",
+                "description": f"Payment for tier booking ({currency} {formatted_amount})",
                 "logo": "https://your-logo-url.com/logo.png"
             },
             "meta": {
                 "booking_id": str(booking_data["id"]),
                 "user_id": user_data["id"],
-                "booking_type": "tier_booking"
+                "booking_type": "tier_booking",
+                "original_currency": "NGN",
+                "payment_currency": currency,
+                "original_amount": booking_data.get("original_amount", amount)
             }
         }
 
@@ -871,10 +1110,15 @@ def generate_flutterwave_payment_url(booking_data: Dict, user_data: Dict, amount
 
         payment_data = response.json()
         if payment_data["status"] == "success":
-            # Update booking with transaction reference
+            # Update booking with transaction reference and currency info
             db.bookings.update_one(
                 {"_id": ObjectId(booking_data["id"])},
-                {"$set": {"flutterwave_tx_ref": tx_ref}}
+                {"$set": {
+                    "flutterwave_tx_ref": tx_ref,
+                    "payment_currency": currency,
+                    "payment_amount_original": booking_data.get("original_amount", amount),
+                    "payment_amount_converted": formatted_amount
+                }}
             )
             return payment_data["data"]["link"]
         else:
@@ -893,6 +1137,7 @@ def generate_flutterwave_payment_url(booking_data: Dict, user_data: Dict, amount
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to generate payment URL"
         )
+
 
 
 def verify_flutterwave_payment(tx_ref: str) -> Dict:
@@ -942,6 +1187,43 @@ def verify_webhook_signature(payload: str, signature: str) -> bool:
     except Exception as e:
         logger.error(f"Error verifying webhook signature: {e}")
         return False
+
+
+async def get_exchange_rate(from_currency: str, to_currency: str) -> float:
+    """Get real-time exchange rate between currencies"""
+    if from_currency == to_currency:
+        return 1.0
+
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(
+                f"{EXCHANGE_RATE_BASE_URL}/{EXCHANGE_RATE_API_KEY}/latest/{from_currency}"
+            )
+            response.raise_for_status()
+            rates = response.json().get("conversion_rates", {})
+            return rates.get(to_currency, 1.0)
+        except Exception as e:
+            logger.error(f"Error fetching exchange rate: {e}")
+            # Fallback rates if API fails
+            fallback_rates = {
+                "NGN": {"USD": 0.00065, "EUR": 0.0006, "GBP": 0.00052},
+                "USD": {"NGN": 1538.46, "EUR": 0.92, "GBP": 0.80},
+                "EUR": {"NGN": 1666.67, "USD": 1.09, "GBP": 0.87},
+                "GBP": {"NGN": 1923.08, "USD": 1.25, "EUR": 1.15}
+            }
+            return fallback_rates.get(from_currency, {}).get(to_currency, 1.0)
+
+
+async def convert_price(amount: float, from_currency: str, to_currency: str) -> float:
+    """Convert price from one currency to another"""
+    if from_currency == to_currency:
+        return amount
+
+    exchange_rate = await get_exchange_rate(from_currency, to_currency)
+    converted_amount = amount * exchange_rate
+    return round(converted_amount, 2)
+
+
 
 
 # Routes
@@ -1057,6 +1339,520 @@ async def get_me(current_user: UserInDB = Depends(get_current_active_user)):
         createdAt=current_user.createdAt,
         updatedAt=current_user.updatedAt
     )
+
+
+@app.get("/gallery", response_model=List[GalleryImage])
+async def get_gallery(
+        skip: int = 0,
+        limit: int = 100,
+        category: Optional[str] = None,
+        tag: Optional[str] = None,
+        # current_user: UserInDB = Depends(get_current_active_user)
+):
+    """
+    Get all gallery images with optional filtering by category or tag.
+    """
+    query = {}
+
+    if category:
+        query["category"] = category
+    if tag:
+        query["tags"] = {"$in": [tag]}
+
+    try:
+        gallery_images = list(db.gallery.find(query).skip(skip).limit(limit))
+        return [
+            GalleryImage(
+                id=str(img["_id"]),
+                title=img["title"],
+                description=img.get("description"),
+                category=img["category"],
+                tags=img.get("tags", []),
+                image_url=img["image_url"],
+                created_by=img["created_by"],
+                created_at=img["created_at"],
+                updated_at=img["updated_at"]
+            ) for img in gallery_images
+        ]
+    except Exception as e:
+        logger.error(f"Error fetching gallery images: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch gallery images"
+        )
+
+
+
+@app.post("/gallery", response_model=GalleryImage)
+async def create_gallery_image(
+        title: str = Form(...),
+        description: Optional[str] = Form(None),
+        category: str = Form(...),
+        tags: str = Form(""),  # Comma-separated string
+        file: UploadFile = File(...),
+        current_user: UserInDB = Depends(get_current_active_user)
+):
+    """
+    Upload a new image to the gallery.
+    """
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File must be an image"
+        )
+
+    if not title.strip() or not category.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Title and category are required"
+        )
+
+    try:
+        # Upload image to Cloudinary
+        image_url = upload_file_to_cloudinary(file, folder="naija_concierge/gallery")
+
+        # Process tags
+        tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+
+        gallery_image = GalleryImageInDB(
+            title=title,
+            description=description,
+            category=category,
+            tags=tag_list,
+            image_url=image_url,
+            created_by=str(current_user.id))
+
+        result = db.gallery.insert_one(gallery_image.dict(by_alias=True))
+        created_image = db.gallery.find_one({"_id": result.inserted_id})
+
+        return GalleryImage(
+            id=str(created_image["_id"]),
+            title=created_image["title"],
+            description=created_image.get("description"),
+            category=created_image["category"],
+            tags=created_image.get("tags", []),
+            image_url=created_image["image_url"],
+            created_by=created_image["created_by"],
+            created_at=created_image["created_at"],
+            updated_at=created_image["updated_at"]
+        )
+    except Exception as e:
+        logger.error(f"Error creating gallery image: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create gallery image"
+        )
+
+@app.get("/gallery/{image_id}", response_model=GalleryImage)
+async def get_gallery_image(
+        image_id: str,
+        # current_user: UserInDB = Depends(get_current_active_user)
+):
+    """
+    Get a specific gallery image by ID.
+    """
+    try:
+        image = db.gallery.find_one({"_id": ObjectId(image_id)})
+        if not image:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Gallery image not found"
+            )
+
+        return GalleryImage(
+            id=str(image["_id"]),
+            title=image["title"],
+            description=image.get("description"),
+            category=image["category"],
+            tags=image.get("tags", []),
+            image_url=image["image_url"],
+            created_by=image["created_by"],
+            created_at=image["created_at"],
+            updated_at=image["updated_at"]
+        )
+    except Exception as e:
+        logger.error(f"Error fetching gallery image: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch gallery image"
+        )
+
+
+
+@app.put("/gallery/{image_id}", response_model=GalleryImage)
+async def update_gallery_image(
+        image_id: str,
+        image_update: GalleryImageUpdate,
+        current_user: UserInDB = Depends(get_current_active_user)
+):
+    """
+    Update a gallery image's metadata (title, description, category, tags).
+    """
+    try:
+        image = db.gallery.find_one({"_id": ObjectId(image_id)})
+        if not image:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Gallery image not found"
+            )
+
+        # Check if user is admin or the creator of the image
+        if current_user.role != "admin" and image["created_by"] != str(current_user.id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not enough permissions to update this image"
+            )
+
+        update_data = image_update.dict(exclude_unset=True)
+        if update_data:
+            update_data["updated_at"] = datetime.utcnow()
+            result = db.gallery.update_one(
+                {"_id": ObjectId(image_id)},
+                {"$set": update_data}
+            )
+
+            if result.modified_count == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Gallery image update failed"
+                )
+
+        updated_image = db.gallery.find_one({"_id": ObjectId(image_id)})
+
+        return GalleryImage(
+            id=str(updated_image["_id"]),
+            title=updated_image["title"],
+            description=updated_image.get("description"),
+            category=updated_image["category"],
+            tags=updated_image.get("tags", []),
+            image_url=updated_image["image_url"],
+            created_by=updated_image["created_by"],
+            created_at=updated_image["created_at"],
+            updated_at=updated_image["updated_at"]
+        )
+    except Exception as e:
+        logger.error(f"Error updating gallery image: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update gallery image"
+        )
+@app.delete("/gallery/{image_id}")
+async def delete_gallery_image(
+        image_id: str,
+        current_user: UserInDB = Depends(get_current_active_user)
+):
+    """
+    Delete a gallery image.
+    """
+    try:
+        image = db.gallery.find_one({"_id": ObjectId(image_id)})
+        if not image:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Gallery image not found"
+            )
+
+        # Check if user is admin or the creator of the image
+        if current_user.role != "admin" and image["created_by"] != str(current_user.id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not enough permissions to delete this image"
+            )
+
+        # Extract public_id from the URL (alternative solution)
+        if "image_url" in image:
+
+            url_parts = image["image_url"].split('/')
+            public_id_with_extension = '/'.join(url_parts[url_parts.index('upload') + 2:])
+            public_id = public_id_with_extension.split('.')[0]  # Remove file extension
+
+
+            cloudinary.uploader.destroy(public_id)
+
+        result = db.gallery.delete_one({"_id": ObjectId(image_id)})
+
+        if result.deleted_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Gallery image deletion failed"
+            )
+
+        return {"message": "Gallery image deleted successfully"}
+    except Exception as e:
+        logger.error(f"Error deleting gallery image: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete gallery image"
+        )
+
+
+@app.post("/gallery/{image_id}/image")
+async def update_gallery_image_file(
+        image_id: str,
+        file: UploadFile = File(...),
+        current_user: UserInDB = Depends(get_current_active_user)
+):
+    """
+    Update the image file for a gallery item.
+    """
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File must be an image"
+        )
+
+    try:
+        image = db.gallery.find_one({"_id": ObjectId(image_id)})
+        if not image:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Gallery image not found"
+            )
+
+        # Check if user is admin or the creator of the image
+        if current_user.role != "admin" and image["created_by"] != str(current_user.id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not enough permissions to update this image"
+            )
+
+        # Upload new image to Cloudinary
+        new_image_url = upload_file_to_cloudinary(file, folder="naija_concierge/gallery")
+
+        # Update the image URL in the database
+        result = db.gallery.update_one(
+            {"_id": ObjectId(image_id)},
+            {"$set": {
+                "image_url": new_image_url,
+                "updated_at": datetime.utcnow()
+            }}
+        )
+
+        if result.modified_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Failed to update gallery image"
+            )
+
+        return {"image_url": new_image_url}
+    except Exception as e:
+        logger.error(f"Error updating gallery image file: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update gallery image file"
+        )
+
+
+
+# crm
+
+@app.get("/crm/clients", response_model=List[CRMClient])
+async def get_crm_clients(
+        skip: int = 0,
+        limit: int = 100,
+        status: Optional[str] = None,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    query = {}
+    if status:
+        query["status"] = status
+
+    clients = list(db.crm_clients.find(query).skip(skip).limit(limit))
+    return [
+        CRMClient(
+            id=str(client["_id"]),
+            clientName=client["clientName"],
+            contactInfo=client["contactInfo"],
+            serviceBooked=client["serviceBooked"],
+            status=client["status"],
+            assignedVendor=client.get("assignedVendor"),
+            notes=client.get("notes"),
+            dueDate=client.get("dueDate"),
+            createdAt=client["createdAt"],
+            updatedAt=client["updatedAt"]
+        ) for client in clients
+    ]
+
+
+@app.post("/crm/clients", response_model=CRMClient)
+async def create_crm_client(
+        client: CRMClientCreate,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    if not client.clientName.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Client name is required"
+        )
+    if not client.contactInfo.get("email") and not client.contactInfo.get("phone"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="At least one contact method (email or phone) is required"
+        )
+
+    try:
+        service = db.services.find_one({"_id": ObjectId(client.serviceBooked)})
+        if not service:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Service not found"
+            )
+    except Exception as e:
+        logger.error(f"Invalid service ID: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid service ID"
+        )
+
+    client_in_db = CRMClientInDB(**client.dict())
+    result = db.crm_clients.insert_one(client_in_db.dict(by_alias=True))
+
+    created_client = db.crm_clients.find_one({"_id": result.inserted_id})
+
+    return CRMClient(
+        id=str(created_client["_id"]),
+        clientName=created_client["clientName"],
+        contactInfo=created_client["contactInfo"],
+        serviceBooked=created_client["serviceBooked"],
+        status=created_client["status"],
+        assignedVendor=created_client.get("assignedVendor"),
+        notes=created_client.get("notes"),
+        dueDate=created_client.get("dueDate"),
+        createdAt=created_client["createdAt"],
+        updatedAt=created_client["updatedAt"]
+    )
+
+
+@app.get("/crm/clients/{client_id}", response_model=CRMClient)
+async def get_crm_client(
+        client_id: str,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    try:
+        client = db.crm_clients.find_one({"_id": ObjectId(client_id)})
+        if not client:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Client not found",
+            )
+
+        return CRMClient(
+            id=str(client["_id"]),
+            clientName=client["clientName"],
+            contactInfo=client["contactInfo"],
+            serviceBooked=client["serviceBooked"],
+            status=client["status"],
+            assignedVendor=client.get("assignedVendor"),
+            notes=client.get("notes"),
+            dueDate=client.get("dueDate"),
+            createdAt=client["createdAt"],
+            updatedAt=client["updatedAt"]
+        )
+    except Exception as e:
+        logger.error(f"Error getting CRM client: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Client not found",
+        )
+
+
+@app.put("/crm/clients/{client_id}", response_model=CRMClient)
+async def update_crm_client(
+        client_id: str,
+        client_update: CRMClientUpdate,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    try:
+        client = db.crm_clients.find_one({"_id": ObjectId(client_id)})
+        if not client:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Client not found",
+            )
+
+        update_data = client_update.dict(exclude_unset=True)
+        if update_data:
+            if "clientName" in update_data and not update_data["clientName"].strip():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Client name cannot be empty"
+                )
+            if "serviceBooked" in update_data:
+                service = db.services.find_one({"_id": ObjectId(update_data["serviceBooked"])})
+                if not service:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Service not found"
+                    )
+            if "contactInfo" in update_data and not (update_data["contactInfo"].get("email") or update_data["contactInfo"].get("phone")):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="At least one contact method (email or phone) is required"
+                )
+            update_data["updatedAt"] = datetime.utcnow()
+            result = db.crm_clients.update_one(
+                {"_id": ObjectId(client_id)},
+                {"$set": update_data}
+            )
+
+            if result.modified_count == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Client update failed",
+                )
+
+
+        updated_client = db.crm_clients.find_one({"_id": ObjectId(client_id)})
+
+        return CRMClient(
+            id=str(updated_client["_id"]),
+            clientName=updated_client["clientName"],
+            contactInfo=updated_client["contactInfo"],
+            serviceBooked=updated_client["serviceBooked"],
+            status=updated_client["status"],
+            assignedVendor=updated_client.get("assignedVendor"),
+            notes=updated_client.get("notes"),
+            dueDate=updated_client.get("dueDate"),
+            createdAt=updated_client["createdAt"],
+            updatedAt=updated_client["updatedAt"]
+        )
+    except Exception as e:
+            logger.error(f"Error updating CRM client: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Client update failed",
+            )
+
+@app.delete("/crm/clients/{client_id}")
+async def delete_crm_client(
+        client_id: str,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    try:
+        client = db.crm_clients.find_one({"_id": ObjectId(client_id)})
+        if not client:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Client not found",
+            )
+
+        result = db.crm_clients.delete_one({"_id": ObjectId(client_id)})
+
+        if result.deleted_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Client deletion failed",
+            )
+
+        return {"message": "Client deleted successfully"}
+    except Exception as e:
+        logger.error(f"Error deleting CRM client: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Client deletion failed",
+        )
+
+
 
 
 # Service Category routes
@@ -1527,6 +2323,58 @@ async def upload_service_tier_image(
 
     image_url = upload_file_to_cloudinary(file, folder="naija_concierge/service_tiers")
     return {"imageUrl": image_url}
+
+
+
+@app.get("/service-tiers/{tier_id}/convert")
+async def convert_tier_price(
+    tier_id: str,
+    currency: str,
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    """Convert tier price to the specified currency"""
+    allowed_currencies = ["NGN", "USD", "EUR", "GBP"]
+    if currency not in allowed_currencies:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Currency must be one of {allowed_currencies}"
+        )
+
+    try:
+        tier = db.service_tiers.find_one({"_id": ObjectId(tier_id)})
+        if not tier:
+            raise HTTPException(
+                status_code=404,
+                detail="Service tier not found"
+            )
+    except Exception as e:
+        logger.error(f"Error fetching tier: {e}")
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid tier ID"
+        )
+
+    base_currency = "NGN"  # Assuming tier prices are stored in NGN
+    amount = tier["price"]
+
+    if currency != base_currency:
+        try:
+            amount = await convert_price(tier["price"], base_currency, currency)
+        except Exception as e:
+            logger.error(f"Currency conversion failed: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to convert currency"
+            )
+
+    return {
+        "convertedPrice": amount,
+        "originalPrice": tier["price"],
+        "originalCurrency": base_currency,
+        "targetCurrency": currency,
+        "exchangeRate": amount / tier["price"] if tier["price"] > 0 else 0
+    }
+
 
 
 # Service routes
@@ -2167,6 +3015,184 @@ async def create_booking(
         tier=tier_obj
     )
 
+
+@app.post("/bookings/tier", response_model=Booking)
+async def create_tier_booking_with_currency(
+        tier_id: str,
+        booking_date: datetime,
+        preferred_currency: str = "NGN",
+        special_requests: Optional[str] = None,
+        current_user: UserInDB = Depends(get_current_active_user)
+):
+    """Create a tier booking with multi-currency support"""
+
+    # Validate currency
+    allowed_currencies = ["NGN", "USD", "EUR", "GBP"]
+    if preferred_currency not in allowed_currencies:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Currency must be one of {allowed_currencies}"
+        )
+
+    # Get tier details
+    try:
+        tier = db.service_tiers.find_one({"_id": ObjectId(tier_id)})
+        if not tier:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Service tier not found"
+            )
+
+        if not tier["is_available"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Service tier is not available"
+            )
+    except Exception as e:
+        logger.error(f"Error checking tier: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid tier ID"
+        )
+
+    # Convert price to preferred currency
+    original_price = tier["price"]  # Assuming stored in NGN
+    converted_price = original_price
+
+    if preferred_currency != "NGN":
+        try:
+            converted_price = await convert_price(original_price, "NGN", preferred_currency)
+        except Exception as e:
+            logger.error(f"Currency conversion failed: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to convert currency"
+            )
+
+    # Create booking
+    booking_data = BookingInDB(
+        userId=str(current_user.id),
+        tierId=tier_id,
+        bookingDate=booking_date,
+        status="pending",
+        specialRequests=special_requests,
+        booking_type=BookingType.TIER_BOOKING,
+        payment_required=True,
+        payment_amount=converted_price,
+        payment_status=PaymentStatus.PENDING
+    )
+
+    result = db.bookings.insert_one(booking_data.dict(by_alias=True))
+    created_booking = db.bookings.find_one({"_id": result.inserted_id})
+
+    # Generate payment URL with proper currency
+    try:
+        payment_url = generate_flutterwave_payment_url(
+            {
+                "id": str(created_booking["_id"]),
+                "original_amount": original_price
+            },
+            current_user.__dict__,
+            converted_price,
+            preferred_currency
+        )
+
+        # Update booking with payment URL
+        db.bookings.update_one(
+            {"_id": result.inserted_id},
+            {"$set": {"payment_url": payment_url}}
+        )
+
+        created_booking["payment_url"] = payment_url
+
+    except Exception as e:
+        logger.error(f"Payment URL generation failed: {e}")
+        # Continue without payment URL
+
+    # Send confirmation email
+    tier_services = list(db.services.find({"tier_id": tier_id}))
+    service_list = ", ".join([s["name"] for s in tier_services])
+
+    booking_html = f"""
+    <html>
+        <body>
+            <h1>Tier Booking Confirmation - Payment Required</h1>
+            <p>Dear {current_user.firstName},</p>
+            <p>Your booking for {tier["name"]} has been received.</p>
+            <p>To confirm your booking, please complete the payment.</p>
+            <p>Booking Details:</p>
+            <ul>
+                <li>Tier: {tier["name"]}</li>
+                <li>Services: {service_list}</li>
+                <li>Date: {booking_date.strftime("%Y-%m-%d %H:%M")}</li>
+                <li>Amount: {preferred_currency} {converted_price:,.2f}</li>
+                <li>Original Price: NGN {original_price:,.2f}</li>
+                <li>Status: Pending Payment</li>
+            </ul>
+            <p>Payment URL: <a href='{payment_url}'>Complete Payment</a></p>
+            <p>Best regards,<br>The Naija Concierge Team</p>
+        </body>
+    </html>
+    """
+    send_email(current_user.email, "Tier Booking Confirmation - Payment Required", booking_html)
+
+    # Get tier object for response
+    tier_service_objects = []
+    for service in tier_services:
+        tier_service_objects.append(
+            Service(
+                id=str(service["_id"]),
+                name=service["name"],
+                description=service["description"],
+                image=service.get("image"),
+                duration=service["duration"],
+                isAvailable=service["isAvailable"],
+                features=service.get("features", []),
+                requirements=service.get("requirements", []),
+                category_id=service.get("category_id"),
+                tier_id=service.get("tier_id"),
+                createdAt=service["createdAt"],
+                updatedAt=service["updatedAt"]
+            )
+        )
+
+    tier_obj = ServiceTier(
+        id=str(tier["_id"]),
+        name=tier["name"],
+        description=tier["description"],
+        price=converted_price,  # Return converted price
+        category_id=tier["category_id"],
+        image=tier.get("image"),
+        features=tier.get("features", []),
+        is_popular=tier.get("is_popular", False),
+        is_available=tier.get("is_available", True),
+        created_at=tier["created_at"],
+        updated_at=tier["updated_at"],
+        services=tier_service_objects
+    )
+
+    return Booking(
+        id=str(created_booking["_id"]),
+        userId=created_booking["userId"],
+        serviceId=created_booking.get("serviceId"),
+        tierId=created_booking.get("tierId"),
+        bookingDate=created_booking["bookingDate"],
+        status=created_booking["status"],
+        specialRequests=created_booking.get("specialRequests"),
+        booking_type=created_booking["booking_type"],
+        contact_preference=created_booking.get("contact_preference"),
+        payment_required=created_booking["payment_required"],
+        payment_amount=created_booking.get("payment_amount"),
+        payment_url=created_booking.get("payment_url"),
+        payment_status=created_booking.get("payment_status", PaymentStatus.PENDING),
+        payment_reference=created_booking.get("payment_reference"),
+        flutterwave_tx_ref=created_booking.get("flutterwave_tx_ref"),
+        createdAt=created_booking["createdAt"],
+        updatedAt=created_booking["updatedAt"],
+        service=None,
+        tier=tier_obj
+    )
+
 @app.get("/bookings", response_model=List[Booking])
 async def get_bookings(
         skip: int = 0,
@@ -2599,11 +3625,141 @@ async def create_airtable_booking(
 
 
 # Payment webhook endpoint
+# @app.post("/webhooks/flutterwave")
+# async def flutterwave_webhook(request: Request):
+#     """Handle Flutterwave payment webhooks"""
+#     try:
+#         # Get raw body for signature verification
+#         body = await request.body()
+#         signature = request.headers.get("verif-hash")
+#
+#         if not verify_webhook_signature(body.decode(), signature):
+#             logger.warning("Invalid webhook signature")
+#             raise HTTPException(
+#                 status_code=status.HTTP_400_BAD_REQUEST,
+#                 detail="Invalid signature"
+#             )
+#
+#         # Parse webhook data
+#         webhook_data = json.loads(body.decode())
+#         event = webhook_data.get("event")
+#         data = webhook_data.get("data", {})
+#
+#         if event == "charge.completed":
+#             tx_ref = data.get("tx_ref")
+#             flw_ref = data.get("flw_ref")
+#             payment_status = data.get("status")
+#             amount = data.get("amount")
+#
+#             if not tx_ref:
+#                 logger.error("No transaction reference in webhook")
+#                 return {"status": "error", "message": "No transaction reference"}
+#
+#             # Find booking by transaction reference
+#             booking = db.bookings.find_one({"flutterwave_tx_ref": tx_ref})
+#             if not booking:
+#                 logger.error(f"No booking found for tx_ref: {tx_ref}")
+#                 return {"status": "error", "message": "Booking not found"}
+#
+#             # Verify payment with Flutterwave
+#             try:
+#                 verification_response = verify_flutterwave_payment(tx_ref)
+#                 verified_data = verification_response.get("data", {})
+#                 verified_status = verified_data.get("status")
+#                 verified_amount = verified_data.get("amount")
+#
+#                 if verified_status == "successful" and verified_amount == booking.get("payment_amount"):
+#                     # Update booking status
+#                     update_data = {
+#                         "payment_status": PaymentStatus.SUCCESSFUL,
+#                         "payment_reference": flw_ref,
+#                         "status": "confirmed",
+#                         "updatedAt": datetime.utcnow()
+#                     }
+#
+#                     db.bookings.update_one(
+#                         {"_id": ObjectId(booking["_id"])},
+#                         {"$set": update_data}
+#                     )
+#
+#                     # Send confirmation email
+#                     user = get_user_by_id(booking["userId"])
+#                     if user:
+#                         # Get tier/service details
+#                         tier_name = "Unknown"
+#                         if booking.get("tierId"):
+#                             tier = db.service_tiers.find_one({"_id": ObjectId(booking["tierId"])})
+#                             if tier:
+#                                 tier_name = tier["name"]
+#
+#                         confirmation_html = f"""
+#                         <html>
+#                             <body>
+#                                 <h1>Payment Successful - Booking Confirmed</h1>
+#                                 <p>Dear {user.firstName},</p>
+#                                 <p>Your payment has been successfully processed and your booking is now confirmed.</p>
+#                                 <p>Payment Details:</p>
+#                                 <ul>
+#                                     <li>Tier: {tier_name}</li>
+#                                     <li>Amount: ₦{verified_amount}</li>
+#                                     <li>Reference: {flw_ref}</li>
+#                                     <li>Status: Confirmed</li>
+#                                 </ul>
+#                                 <p>Our team will contact you shortly to coordinate the service delivery.</p>
+#                                 <p>Best regards,<br>The Naija Concierge Team</p>
+#                             </body>
+#                         </html>
+#                         """
+#                         send_email(user.email, "Payment Successful - Booking Confirmed", confirmation_html)
+#
+#                     # Send admin notification
+#                     admin_notification = f"""
+#                     Payment received for booking:
+#                     - Booking ID: {booking["_id"]}
+#                     - Client: {user.firstName} {user.lastName} if user else "Unknown"
+#                     - Tier: {tier_name}
+#                     - Amount: ₦{verified_amount}
+#                     - Reference: {flw_ref}
+#                     - Status: Confirmed
+#                     """
+#                     send_admin_notification("Payment Received", admin_notification)
+#
+#                     logger.info(f"Payment successful for booking {booking['_id']}")
+#
+#                 elif verified_status == "failed":
+#                     # Update booking as failed
+#                     db.bookings.update_one(
+#                         {"_id": ObjectId(booking["_id"])},
+#                         {"$set": {
+#                             "payment_status": PaymentStatus.FAILED,
+#                             "payment_reference": flw_ref,
+#                             "updatedAt": datetime.utcnow()
+#                         }}
+#                     )
+#
+#                     logger.info(f"Payment failed for booking {booking['_id']}")
+#
+#                 else:
+#                     logger.warning(f"Unhandled payment status: {verified_status}")
+#
+#             except Exception as e:
+#                 logger.error(f"Error verifying payment: {e}")
+#                 return {"status": "error", "message": "Payment verification failed"}
+#
+#         return {"status": "success"}
+#
+#     except Exception as e:
+#         logger.error(f"Error processing webhook: {e}")
+#         raise HTTPException(
+#             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+#             detail="Webhook processing failed"
+#         )
+
+
 @app.post("/webhooks/flutterwave")
-async def flutterwave_webhook(request: Request):
-    """Handle Flutterwave payment webhooks"""
+async def flutterwave_webhook_enhanced(request: Request):
+    """Enhanced webhook handler with multi-currency support"""
     try:
-        # Get raw body for signature verification
         body = await request.body()
         signature = request.headers.get("verif-hash")
 
@@ -2614,7 +3770,6 @@ async def flutterwave_webhook(request: Request):
                 detail="Invalid signature"
             )
 
-        # Parse webhook data
         webhook_data = json.loads(body.decode())
         event = webhook_data.get("event")
         data = webhook_data.get("data", {})
@@ -2623,7 +3778,8 @@ async def flutterwave_webhook(request: Request):
             tx_ref = data.get("tx_ref")
             flw_ref = data.get("flw_ref")
             payment_status = data.get("status")
-            amount = data.get("amount")
+            paid_amount = data.get("amount")
+            payment_currency = data.get("currency")
 
             if not tx_ref:
                 logger.error("No transaction reference in webhook")
@@ -2641,13 +3797,20 @@ async def flutterwave_webhook(request: Request):
                 verified_data = verification_response.get("data", {})
                 verified_status = verified_data.get("status")
                 verified_amount = verified_data.get("amount")
+                verified_currency = verified_data.get("currency")
 
-                if verified_status == "successful" and verified_amount == booking.get("payment_amount"):
+                # Check if payment is successful and amounts match
+                expected_amount = booking.get("payment_amount", 0)
+                amount_matches = abs(float(verified_amount) - float(expected_amount)) < 0.01
+
+                if verified_status == "successful" and amount_matches:
                     # Update booking status
                     update_data = {
                         "payment_status": PaymentStatus.SUCCESSFUL,
                         "payment_reference": flw_ref,
                         "status": "confirmed",
+                        "payment_currency_final": verified_currency,
+                        "payment_amount_final": verified_amount,
                         "updatedAt": datetime.utcnow()
                     }
 
@@ -2659,8 +3822,10 @@ async def flutterwave_webhook(request: Request):
                     # Send confirmation email
                     user = get_user_by_id(booking["userId"])
                     if user:
-                        # Get tier/service details
+                        # Get tier details
                         tier_name = "Unknown"
+                        original_amount = booking.get("payment_amount_original", verified_amount)
+
                         if booking.get("tierId"):
                             tier = db.service_tiers.find_one({"_id": ObjectId(booking["tierId"])})
                             if tier:
@@ -2675,7 +3840,8 @@ async def flutterwave_webhook(request: Request):
                                 <p>Payment Details:</p>
                                 <ul>
                                     <li>Tier: {tier_name}</li>
-                                    <li>Amount: ₦{verified_amount}</li>
+                                    <li>Amount Paid: {verified_currency} {verified_amount}</li>
+                                    <li>Original Price: NGN {original_amount}</li>
                                     <li>Reference: {flw_ref}</li>
                                     <li>Status: Confirmed</li>
                                 </ul>
@@ -2685,18 +3851,6 @@ async def flutterwave_webhook(request: Request):
                         </html>
                         """
                         send_email(user.email, "Payment Successful - Booking Confirmed", confirmation_html)
-
-                    # Send admin notification
-                    admin_notification = f"""
-                    Payment received for booking:
-                    - Booking ID: {booking["_id"]}
-                    - Client: {user.firstName} {user.lastName} if user else "Unknown"
-                    - Tier: {tier_name}
-                    - Amount: ₦{verified_amount}
-                    - Reference: {flw_ref}
-                    - Status: Confirmed
-                    """
-                    send_admin_notification("Payment Received", admin_notification)
 
                     logger.info(f"Payment successful for booking {booking['_id']}")
 
@@ -2714,7 +3868,8 @@ async def flutterwave_webhook(request: Request):
                     logger.info(f"Payment failed for booking {booking['_id']}")
 
                 else:
-                    logger.warning(f"Unhandled payment status: {verified_status}")
+                    logger.warning(
+                        f"Payment verification failed - Status: {verified_status}, Amount match: {amount_matches}")
 
             except Exception as e:
                 logger.error(f"Error verifying payment: {e}")
@@ -2729,6 +3884,30 @@ async def flutterwave_webhook(request: Request):
             detail="Webhook processing failed"
         )
 
+
+@app.get("/exchange-rates")
+async def get_current_exchange_rates():
+    """Get current exchange rates for all supported currencies"""
+    base_currency = "NGN"
+    target_currencies = ["USD", "EUR", "GBP"]
+
+    rates = {"NGN": 1.0}  # Base currency
+
+    for currency in target_currencies:
+        try:
+            rate = await get_exchange_rate(base_currency, currency)
+            rates[currency] = rate
+        except Exception as e:
+            logger.error(f"Failed to get rate for {currency}: {e}")
+            # Use fallback rates
+            fallback_rates = {"USD": 0.00065, "EUR": 0.0006, "GBP": 0.00052}
+            rates[currency] = fallback_rates.get(currency, 1.0)
+
+    return {
+        "base_currency": base_currency,
+        "rates": rates,
+        "timestamp": datetime.utcnow().isoformat()
+    }
 
 # Payment verification endpoint
 @app.get("/payments/verify/{tx_ref}")
@@ -2798,6 +3977,418 @@ async def payment_failed(tx_ref: Optional[str] = None):
     }
 
 
+# Blog Routes
+@app.get("/blogs", response_model=List[Blog])
+async def get_blogs(
+        skip: int = 0,
+        limit: int = 100,
+        tag: Optional[str] = None
+):
+    query = {}
+    if tag:
+        query["tags"] = {"$in": [tag]}
+
+    blogs = list(db.blogs.find(query).skip(skip).limit(limit))
+    return [
+        Blog(
+            id=str(blog["_id"]),
+            title=blog["title"],
+            slug=blog["slug"],
+            content=blog["content"],
+            excerpt=blog["excerpt"],
+            coverImage=blog.get("coverImage"),
+            author=blog["author"],
+            tags=blog["tags"],
+            createdAt=blog["createdAt"],
+            updatedAt=blog["updatedAt"]
+        ) for blog in blogs
+    ]
+
+
+@app.get("/blogs/{blog_id}", response_model=Blog)
+async def get_blog(blog_id: str):
+    try:
+        blog = db.blogs.find_one({"_id": ObjectId(blog_id)})
+        if not blog:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Blog not found",
+            )
+
+        return Blog(
+            id=str(blog["_id"]),
+            title=blog["title"],
+            slug=blog["slug"],
+            content=blog["content"],
+            excerpt=blog["excerpt"],
+            coverImage=blog.get("coverImage"),
+            author=blog["author"],
+            tags=blog["tags"],
+            createdAt=blog["createdAt"],
+            updatedAt=blog["updatedAt"]
+        )
+    except Exception as e:
+        logger.error(f"Error getting blog: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Blog not found",
+        )
+
+@app.get("/blogs/blog/{slug}", response_model=Blog)
+async def get_blog_by_slug(slug: str):
+    blog = db.blogs.find_one({"slug": slug})
+    if not blog:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Blog not found",
+        )
+
+    return Blog(
+        id=str(blog["_id"]),
+        title=blog["title"],
+        slug=blog["slug"],
+        content=blog["content"],
+        excerpt=blog["excerpt"],
+        coverImage=blog.get("coverImage"),
+        author=blog["author"],
+        tags=blog["tags"],
+        createdAt=blog["createdAt"],
+        updatedAt=blog["updatedAt"]
+    )
+
+
+@app.post("/blogs", response_model=Blog)
+async def create_blog(
+        blog: BlogCreate,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    if not blog.title.strip() or not blog.slug.strip() or not blog.content.strip() or not blog.excerpt.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Title, slug, content, and excerpt are required"
+        )
+    if not blog.author.get("name"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Author name is required"
+        )
+
+    existing_blog = db.blogs.find_one({"slug": blog.slug})
+    if existing_blog:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Blog with this slug already exists",
+        )
+
+    blog_in_db = BlogInDB(**blog.dict())
+    result = db.blogs.insert_one(blog_in_db.dict(by_alias=True))
+
+    created_blog = db.blogs.find_one({"_id": result.inserted_id})
+
+    return Blog(
+        id=str(created_blog["_id"]),
+        title=created_blog["title"],
+        slug=created_blog["slug"],
+        content=created_blog["content"],
+        excerpt=created_blog["excerpt"],
+        coverImage=created_blog.get("coverImage"),
+        author=created_blog["author"],
+        tags=created_blog["tags"],
+        createdAt=created_blog["createdAt"],
+        updatedAt=created_blog["updatedAt"]
+    )
+
+
+@app.put("/blogs/{blog_id}", response_model=Blog)
+async def update_blog(
+        blog_id: str,
+        blog_update: BlogUpdate,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    try:
+        blog = db.blogs.find_one({"_id": ObjectId(blog_id)})
+        if not blog:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Blog not found",
+            )
+
+        update_data = blog_update.dict(exclude_unset=True)
+        if update_data:
+            if "title" in update_data and not update_data["title"].strip():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Title cannot be empty"
+                )
+            if "slug" in update_data:
+                if not update_data["slug"].strip():
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Slug cannot be empty"
+                    )
+                existing_blog = db.blogs.find_one({"slug": update_data["slug"], "_id": {"$ne": ObjectId(blog_id)}})
+                if existing_blog:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Blog with this slug already exists",
+                    )
+            if "content" in update_data and not update_data["content"].strip():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Content cannot be empty"
+                )
+            if "excerpt" in update_data and not update_data["excerpt"].strip():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Excerpt cannot be empty"
+                )
+            if "author" in update_data and not update_data["author"].get("name"):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Author name is required"
+                )
+
+            update_data["updatedAt"] = datetime.utcnow()
+            result = db.blogs.update_one(
+                {"_id": ObjectId(blog_id)},
+                {"$set": update_data}
+            )
+
+            if result.modified_count == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Blog update failed",
+                )
+
+        updated_blog = db.blogs.find_one({"_id": ObjectId(blog_id)})
+
+        return Blog(
+            id=str(updated_blog["_id"]),
+            title=updated_blog["title"],
+            slug=updated_blog["slug"],
+            content=updated_blog["content"],
+            excerpt=updated_blog["excerpt"],
+            coverImage=updated_blog.get("coverImage"),
+            author=updated_blog["author"],
+            tags=updated_blog["tags"],
+            createdAt=updated_blog["createdAt"],
+            updatedAt=updated_blog["updatedAt"]
+        )
+    except Exception as e:
+        logger.error(f"Error updating blog: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Blog update failed",
+        )
+
+@app.delete("/blogs/{blog_id}")
+async def delete_blog(
+        blog_id: str,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    try:
+        # Check if blog exists
+        blog = db.blogs.find_one({"_id": ObjectId(blog_id)})
+        if not blog:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Blog not found",
+            )
+
+        # Delete blog
+        result = db.blogs.delete_one({"_id": ObjectId(blog_id)})
+
+        if result.deleted_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Blog deletion failed",
+            )
+
+        return {"message": "Blog deleted successfully"}
+    except Exception as e:
+        logger.error(f"Error deleting blog: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Blog deletion failed",
+        )
+
+@app.post("/blogs/image")
+async def upload_blog_image(
+        file: UploadFile = File(...),
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File must be an image"
+        )
+
+    # Upload to Cloudinary
+    image_url = upload_file_to_cloudinary(file, folder="naija_concierge/blogs")
+
+    return {"imageUrl": image_url}
+
+
+# Emergency Alert routes
+@app.get("/emergency-alerts", response_model=List[EmergencyAlert])
+async def get_emergency_alerts(
+        skip: int = 0,
+        limit: int = 100,
+        status: Optional[str] = None,
+        current_user: UserInDB = Depends(get_current_active_user)
+):
+    query = {}
+
+    # Regular users can only see their own alerts
+    if current_user.role != "admin":
+        query["userId"] = str(current_user.id)
+
+    if status:
+        query["status"] = status
+
+    alerts = list(db.emergency_alerts.find(query).skip(skip).limit(limit))
+    return [
+        EmergencyAlert(
+            id=str(alert["_id"]),
+            userId=alert["userId"],
+            message=alert["message"],
+            location=alert.get("location"),
+            status=alert["status"],
+            createdAt=alert["createdAt"],
+            updatedAt=alert["updatedAt"]
+        ) for alert in alerts
+    ]
+
+
+@app.post("/emergency-alerts", response_model=EmergencyAlert)
+async def create_emergency_alert(
+        alert: EmergencyAlertCreate,
+        current_user: UserInDB = Depends(get_current_active_user)
+):
+    if not alert.message.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Message is required"
+        )
+
+    if alert.userId != str(current_user.id) and current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not enough permissions",
+        )
+
+    alert_in_db = EmergencyAlertInDB(**alert.dict())
+    result = db.emergency_alerts.insert_one(alert_in_db.dict(by_alias=True))
+
+    created_alert = db.emergency_alerts.find_one({"_id": result.inserted_id})
+
+    user = get_user_by_id(alert.userId)
+    if user:
+        alert_html = f"""
+        <html>
+            <body>
+                <h1>Emergency Alert Received</h1>
+                <p>Dear {user.firstName},</p>
+                <p>We have received your emergency alert: {alert.message}</p>
+                <p>Our team is responding and will contact you shortly.</p>
+                <p>Best regards,<br>The Naija Concierge Team</p>
+            </body>
+        </html>
+        """
+        send_email(user.email, "Emergency Alert - Naija Concierge", alert_html)
+
+    notification_message = f"""
+    New emergency alert:
+    - Client: {user.firstName} {user.lastName}
+    - Message: {alert.message}
+    - Location: {alert.location or "Not provided"}
+    - Status: {created_alert["status"]}
+    """
+    send_admin_notification("New Emergency Alert", notification_message)
+
+    return EmergencyAlert(
+        id=str(created_alert["_id"]),
+        userId=created_alert["userId"],
+        message=created_alert["message"],
+        location=created_alert.get("location"),
+        status=created_alert["status"],
+        createdAt=created_alert["createdAt"],
+        updatedAt=created_alert["updatedAt"]
+    )
+
+
+
+@app.put("/emergency-alerts/{alert_id}", response_model=EmergencyAlert)
+async def update_emergency_alert(
+        alert_id: str,
+        alert_update: EmergencyAlertUpdate,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    try:
+        alert = db.emergency_alerts.find_one({"_id": ObjectId(alert_id)})
+        if not alert:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Emergency alert not found",
+            )
+
+        update_data = alert_update.dict(exclude_unset=True)
+        if update_data:
+            if "message" in update_data and not update_data["message"].strip():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Message cannot be empty"
+                )
+
+            update_data["updatedAt"] = datetime.utcnow()
+            result = db.emergency_alerts.update_one(
+                {"_id": ObjectId(alert_id)},
+                {"$set": update_data}
+            )
+
+            if result.modified_count == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Emergency alert update failed",
+                )
+
+        updated_alert = db.emergency_alerts.find_one({"_id": ObjectId(alert_id)})
+
+        if "status" in update_data:
+            user = get_user_by_id(updated_alert["userId"])
+            if user:
+                status_update_html = f"""
+                <html>
+                    <body>
+                        <h1>Emergency Alert Status Update</h1>
+                        <p>Dear {user.firstName},</p>
+                        <p>Your emergency alert has been updated to {updated_alert["status"]}.</p>
+                        <p>Message: {updated_alert["message"]}</p>
+                        <p>If you need further assistance, please contact us.</p>
+                        <p>Best regards,<br>The Naija Concierge Team</p>
+                    </body>
+                </html>
+                """
+                send_email(user.email, "Emergency Alert Status Update - Naija Concierge", status_update_html)
+
+        return EmergencyAlert(
+            id=str(updated_alert["_id"]),
+            userId=updated_alert["userId"],
+            message=updated_alert["message"],
+            location=updated_alert.get("location"),
+            status=updated_alert["status"],
+            createdAt=updated_alert["createdAt"],
+            updatedAt=updated_alert["updatedAt"]
+        )
+    except Exception as e:
+        logger.error(f"Error updating emergency alert: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Emergency alert update failed",
+        )
+
+
+
 # Contact routes
 @app.post("/contact")
 async def send_contact_message(message: ContactMessage):
@@ -2851,6 +4442,215 @@ async def send_contact_message(message: ContactMessage):
         )
 
 
+
+# Admin dashboard stats
+@app.get("/admin/stats")
+async def get_admin_stats(current_user: UserInDB = Depends(get_admin_user)):
+    try:
+        # Get total users
+        total_users = db.users.count_documents({})
+
+        # Get total bookings
+        total_bookings = db.bookings.count_documents({})
+
+        # Get total revenue
+        bookings = list(db.bookings.find({"status": {"$in": ["confirmed", "completed"]}}))
+        total_revenue = 0
+        for booking in bookings:
+            try:
+                service = db.services.find_one({"_id": ObjectId(booking["serviceId"])})
+                if service:
+                    total_revenue += service["price"]
+            except Exception:
+                pass
+
+        # Get active packages
+        active_packages = db.subscriptions.count_documents({"status": "active"})
+
+        # Get user growth (last 30 days)
+        thirty_days_ago = datetime.utcnow() - timedelta(days=30)
+        new_users = db.users.count_documents({"createdAt": {"$gte": thirty_days_ago}})
+        user_growth = (new_users / total_users) * 100 if total_users > 0 else 0
+
+        # Get booking growth (last 30 days)
+        new_bookings = db.bookings.count_documents({"createdAt": {"$gte": thirty_days_ago}})
+        booking_growth = (new_bookings / total_bookings) * 100 if total_bookings > 0 else 0
+
+        # Get revenue growth (compare last 30 days with previous 30 days)
+        last_30_days_bookings = list(db.bookings.find({
+            "createdAt": {"$gte": thirty_days_ago},
+            "status": {"$in": ["confirmed", "completed"]}
+        }))
+        last_30_days_revenue = 0
+        for booking in last_30_days_bookings:
+            try:
+                service = db.services.find_one({"_id": ObjectId(booking["serviceId"])})
+                if service:
+                    last_30_days_revenue += service["price"]
+            except Exception:
+                pass
+
+        previous_30_days_start = thirty_days_ago - timedelta(days=30)
+        previous_30_days_bookings = list(db.bookings.find({
+            "createdAt": {"$gte": previous_30_days_start, "$lt": thirty_days_ago},
+            "status": {"$in": ["confirmed", "completed"]}
+        }))
+        previous_30_days_revenue = 0
+        for booking in previous_30_days_bookings:
+            try:
+                service = db.services.find_one({"_id": ObjectId(booking["serviceId"])})
+                if service:
+                    previous_30_days_revenue += service["price"]
+            except Exception:
+                pass
+
+        revenue_growth = ((
+                                      last_30_days_revenue - previous_30_days_revenue) / previous_30_days_revenue) * 100 if previous_30_days_revenue > 0 else 0
+
+        # Get package growth (compare active packages with previous month)
+        current_active_packages = db.subscriptions.count_documents({
+            "status": "active",
+            "startDate": {"$gte": thirty_days_ago}
+        })
+        previous_active_packages = db.subscriptions.count_documents({
+            "status": "active",
+            "startDate": {"$gte": previous_30_days_start, "$lt": thirty_days_ago}
+        })
+        package_growth = ((
+                                      current_active_packages - previous_active_packages) / previous_active_packages) * 100 if previous_active_packages > 0 else 0
+
+        return {
+            "totalUsers": total_users,
+            "totalBookings": total_bookings,
+            "totalRevenue": total_revenue,
+            "activePackages": active_packages,
+            "userGrowth": round(user_growth, 1),
+            "bookingGrowth": round(booking_growth, 1),
+            "revenueGrowth": round(revenue_growth, 1),
+            "packageGrowth": round(package_growth, 1)
+        }
+    except Exception as e:
+        logger.error(f"Error getting admin stats: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get admin stats",
+        )
+
+
+
+
+@app.get("/analytics/chart-data", response_model=ChartDataResponse)
+async def get_chart_data(timeframe: Timeframe = Timeframe.weekly):
+    try:
+        if timeframe == Timeframe.weekly:
+            # Get data for the last 7 days
+            end_date = datetime.utcnow()
+            start_date = end_date - timedelta(days=7)
+
+            # Generate day names for the past 7 days
+            days = [(start_date + timedelta(days=i)).strftime("%a") for i in range(7)]
+
+            booking_data = []
+            revenue_data = []
+
+            for i, day in enumerate(days):
+                day_start = start_date + timedelta(days=i)
+                day_end = day_start + timedelta(days=1)
+
+                # Count bookings for the day
+                total_bookings = db.bookings.count_documents({
+                    "bookingDate": {"$gte": day_start, "$lt": day_end}
+                })
+
+                # Count completed bookings for the day
+                completed_bookings = db.bookings.count_documents({
+                    "bookingDate": {"$gte": day_start, "$lt": day_end},
+                    "status": "completed"
+                })
+
+                # Calculate revenue for the day
+                day_bookings = db.bookings.find({
+                    "bookingDate": {"$gte": day_start, "$lt": day_end},
+                    "status": {"$in": ["confirmed", "completed"]}
+                })
+
+                day_revenue = 0
+                for booking in day_bookings:
+                    service = db.services.find_one({"_id": ObjectId(booking["serviceId"])})
+                    if service:
+                        day_revenue += service["price"]
+
+                booking_data.append({
+                    "name": day,
+                    "bookings": total_bookings,
+                    "completed": completed_bookings
+                })
+
+                revenue_data.append({
+                    "name": day,
+                    "revenue": day_revenue
+                })
+
+        else:  # Monthly timeframe
+            # Get data for the last 4 weeks
+            end_date = datetime.utcnow()
+            start_date = end_date - timedelta(weeks=4)
+
+            booking_data = []
+            revenue_data = []
+
+            for week in range(4):
+                week_start = start_date + timedelta(weeks=week)
+                week_end = week_start + timedelta(weeks=1)
+
+                # Count bookings for the week
+                total_bookings = db.bookings.count_documents({
+                    "bookingDate": {"$gte": week_start, "$lt": week_end}
+                })
+
+                # Count completed bookings for the week
+                completed_bookings = db.bookings.count_documents({
+                    "bookingDate": {"$gte": week_start, "$lt": week_end},
+                    "status": "completed"
+                })
+
+                # Calculate revenue for the week
+                week_bookings = db.bookings.find({
+                    "bookingDate": {"$gte": week_start, "$lt": week_end},
+                    "status": {"$in": ["confirmed", "completed"]}
+                })
+
+                week_revenue = 0
+                for booking in week_bookings:
+                    service = db.services.find_one({"_id": ObjectId(booking["serviceId"])})
+                    if service:
+                        week_revenue += service["price"]
+
+                booking_data.append({
+                    "name": f"Week {week + 1}",
+                    "bookings": total_bookings,
+                    "completed": completed_bookings
+                })
+
+                revenue_data.append({
+                    "name": f"Week {week + 1}",
+                    "revenue": week_revenue
+                })
+
+        return {
+            "bookingData": booking_data,
+            "revenueData": revenue_data
+        }
+
+    except Exception as e:
+        logger.error(f"Error fetching chart data: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch chart data"
+        )
+
+
+
 # Newsletter subscription
 @app.post("/newsletter/subscribe")
 async def subscribe_to_newsletter(email: EmailStr):
@@ -2887,6 +4687,54 @@ async def subscribe_to_newsletter(email: EmailStr):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to subscribe to newsletter"
+        )
+
+@app.post("/newsletter/unsubscribe")
+async def unsubscribe_from_newsletter(
+        email: EmailStr = Form(...)
+):
+    """
+    Unsubscribe from the newsletter
+    """
+    try:
+        result = db.newsletter_subscribers.update_one(
+            {"email": email, "is_active": True},
+            {"$set": {"is_active": False}}
+        )
+
+        if result.modified_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Email not found in active subscriptions"
+            )
+
+        # Send confirmation email
+        confirmation_html = f"""
+        <html>
+            <body>
+                <h1>You're Unsubscribed</h1>
+                <p>You've been successfully unsubscribed from our newsletter.</p>
+                <p>We're sorry to see you go. You can resubscribe anytime.</p>
+                <p>Best regards,<br>The Naija Concierge Team</p>
+            </body>
+        </html>
+        """
+
+        send_email(
+            email,
+            "You're Unsubscribed - Naija Concierge",
+            confirmation_html
+        )
+
+        return {"message": "Successfully unsubscribed"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error unsubscribing from newsletter: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to process unsubscribe request"
         )
 
 
