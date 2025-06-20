@@ -1798,30 +1798,29 @@ async def upload_service_image(
     return {"imageUrl": image_url}
 
 
-# Enhanced Booking routes with Flutterwave payment integration
 @app.post("/bookings", response_model=Booking)
 async def create_booking(
         booking: BookingCreate,
         current_user: UserInDB = Depends(get_current_active_user)
 ):
-    """Create a new booking for either a service or tier with payment integration"""
+    """Create a new booking for either a service category or tier with payment integration"""
     if current_user.role != "admin" and booking.userId != str(current_user.id):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not enough permissions"
         )
 
-    # Must have either serviceId or tierId, but not both
+    # Must have either serviceId (category) or tierId, but not both
     if not booking.serviceId and not booking.tierId:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Either serviceId or tierId must be provided"
+            detail="Either serviceId (category) or tierId must be provided"
         )
 
     if booking.serviceId and booking.tierId:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot book both service and tier simultaneously"
+            detail="Cannot book both service category and tier simultaneously"
         )
 
     service_obj = None
@@ -1829,22 +1828,9 @@ async def create_booking(
     category_obj = None
 
     if booking.serviceId:
-        # Individual service booking (contact-only)
+        # Individual service category booking (contact-only)
         try:
-            service = db.service_categories.find_one({"_id": ObjectId(booking.serviceId)})
-            if not service:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Service not found"
-                )
-
-            if not service["isAvailable"]:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Service is not available"
-                )
-
-            # Get category to determine booking type
+            # Query service_categories collection instead of services
             category = db.service_categories.find_one({"_id": ObjectId(booking.serviceId)})
             if not category:
                 raise HTTPException(
@@ -1852,6 +1838,13 @@ async def create_booking(
                     detail="Service category not found"
                 )
 
+            if not category["is_active"]:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Service category is not available"
+                )
+
+            # Verify it's a contact-only category
             if category["category_type"] != ServiceCategoryType.CONTACT_ONLY:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -1863,20 +1856,27 @@ async def create_booking(
             booking.payment_amount = 0.0
             booking.payment_status = PaymentStatus.PENDING
 
-            service_obj = Service(
-                id=str(service["_id"]),
-                name=service["name"],
-                description=service["description"],
-                image=service.get("image"),
-                duration=service["duration"],
-                isAvailable=service["isAvailable"],
-                features=service.get("features", []),
-                requirements=service.get("requirements", []),
-                category_id=service.get("category_id"),
-                tier_id=service.get("tier_id"),
-                createdAt=service["createdAt"],
-                updatedAt=service["updatedAt"]
-            )
+            # Get services within this category
+            category_services = list(db.services.find({"category_id": booking.serviceId}))
+            category_service_objects = []
+
+            for service in category_services:
+                category_service_objects.append(
+                    Service(
+                        id=str(service["_id"]),
+                        name=service["name"],
+                        description=service["description"],
+                        image=service.get("image"),
+                        duration=service["duration"],
+                        isAvailable=service["isAvailable"],
+                        features=service.get("features", []),
+                        requirements=service.get("requirements", []),
+                        category_id=service.get("category_id"),
+                        tier_id=service.get("tier_id"),
+                        createdAt=service["createdAt"],
+                        updatedAt=service["updatedAt"]
+                    )
+                )
 
             category_obj = ServiceCategory(
                 id=str(category["_id"]),
@@ -1888,19 +1888,20 @@ async def create_booking(
                 created_at=category["created_at"],
                 updated_at=category["updated_at"],
                 tiers=[],
-                services=[]
+                services=category_service_objects
             )
 
         except Exception as e:
-            logger.error(f"Error checking service: {e}")
+            logger.error(f"Error checking service category: {e}")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid service ID"
+                detail="Invalid service category ID"
             )
 
     elif booking.tierId:
         # Tier booking (online payment)
         try:
+            # Query service_tiers collection
             tier = db.service_tiers.find_one({"_id": ObjectId(booking.tierId)})
             if not tier:
                 raise HTTPException(
@@ -1914,7 +1915,7 @@ async def create_booking(
                     detail="Service tier is not available"
                 )
 
-            # Get category to verify it's tiered
+            # Get the parent category
             category = db.service_categories.find_one({"_id": ObjectId(tier["category_id"])})
             if not category:
                 raise HTTPException(
@@ -1922,6 +1923,7 @@ async def create_booking(
                     detail="Service category not found"
                 )
 
+            # Verify it's a tiered category
             if category["category_type"] != ServiceCategoryType.TIERED:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -1970,6 +1972,50 @@ async def create_booking(
                 services=tier_service_objects
             )
 
+            # Get all tiers for this category
+            category_tiers = list(db.service_tiers.find({"category_id": tier["category_id"]}))
+            category_tier_objects = []
+
+            for cat_tier in category_tiers:
+                # Get services for each tier
+                tier_services_for_cat = list(db.services.find({"tier_id": str(cat_tier["_id"])}))
+                tier_service_objects_for_cat = []
+
+                for service in tier_services_for_cat:
+                    tier_service_objects_for_cat.append(
+                        Service(
+                            id=str(service["_id"]),
+                            name=service["name"],
+                            description=service["description"],
+                            image=service.get("image"),
+                            duration=service["duration"],
+                            isAvailable=service["isAvailable"],
+                            features=service.get("features", []),
+                            requirements=service.get("requirements", []),
+                            category_id=service.get("category_id"),
+                            tier_id=service.get("tier_id"),
+                            createdAt=service["createdAt"],
+                            updatedAt=service["updatedAt"]
+                        )
+                    )
+
+                category_tier_objects.append(
+                    ServiceTier(
+                        id=str(cat_tier["_id"]),
+                        name=cat_tier["name"],
+                        description=cat_tier["description"],
+                        price=cat_tier["price"],
+                        category_id=cat_tier["category_id"],
+                        image=cat_tier.get("image"),
+                        features=cat_tier.get("features", []),
+                        is_popular=cat_tier.get("is_popular", False),
+                        is_available=cat_tier.get("is_available", True),
+                        created_at=cat_tier["created_at"],
+                        updated_at=cat_tier["updated_at"],
+                        services=tier_service_objects_for_cat
+                    )
+                )
+
             category_obj = ServiceCategory(
                 id=str(category["_id"]),
                 name=category["name"],
@@ -1979,7 +2025,7 @@ async def create_booking(
                 is_active=category["is_active"],
                 created_at=category["created_at"],
                 updated_at=category["updated_at"],
-                tiers=[],
+                tiers=category_tier_objects,
                 services=[]
             )
 
@@ -2029,12 +2075,12 @@ async def create_booking(
                 <body>
                     <h1>Service Request Received</h1>
                     <p>Dear {user.firstName},</p>
-                    <p>We have received your request for {service_obj.name} from {category_obj.name}.</p>
+                    <p>We have received your request for services from {category_obj.name}.</p>
                     <p>Our team will contact you within 24 hours to discuss your requirements and provide a custom quote.</p>
                     <p>Booking Details:</p>
                     <ul>
-                        <li>Service: {service_obj.name}</li>
                         <li>Category: {category_obj.name}</li>
+                        <li>Available Services: {', '.join([s.name for s in category_obj.services])}</li>
                         <li>Preferred Date: {created_booking["bookingDate"].strftime("%Y-%m-%d %H:%M")}</li>
                         <li>Contact Preference: {created_booking.get("contact_preference", "email")}</li>
                         <li>Special Requests: {created_booking.get("specialRequests", "None")}</li>
@@ -2044,6 +2090,7 @@ async def create_booking(
             </html>
             """
             send_email(user.email, "Service Request - Naija Concierge", booking_html)
+
         elif booking.booking_type == BookingType.TIER_BOOKING:
             service_list = ", ".join([s.name for s in tier_obj.services])
             payment_info = f"<p>Payment URL: <a href='{payment_url}'>Complete Payment</a></p>" if payment_url else "<p>Payment URL will be provided shortly.</p>"
@@ -2053,7 +2100,7 @@ async def create_booking(
                     <h1>Tier Booking Confirmation - Payment Required</h1>
                     <p>Dear {user.firstName},</p>
                     <p>Your booking for {tier_obj.name} from {category_obj.name} has been received.</p>
-                    <p>To confirm your booking, please complete the payment of ₦{tier_obj.price}.</p>
+                    <p>To confirm your booking, please complete the payment of ₦{tier_obj.price:,.2f}.</p>
                     {payment_info}
                     <p>Booking Details:</p>
                     <ul>
@@ -2061,7 +2108,7 @@ async def create_booking(
                         <li>Category: {category_obj.name}</li>
                         <li>Included Services: {service_list}</li>
                         <li>Date: {created_booking["bookingDate"].strftime("%Y-%m-%d %H:%M")}</li>
-                        <li>Amount: ₦{tier_obj.price}</li>
+                        <li>Amount: ₦{tier_obj.price:,.2f}</li>
                         <li>Status: Pending Payment</li>
                     </ul>
                     <p>Best regards,<br>The Naija Concierge Team</p>
@@ -2072,13 +2119,15 @@ async def create_booking(
 
     # Send admin notification
     if booking.booking_type == BookingType.CONSULTATION:
+        available_services = ", ".join([s.name for s in category_obj.services])
         notification_message = f"""
-        New service request:
+        New service category request:
         - Client: {user.firstName} {user.lastName}
-        - Service: {service_obj.name}
         - Category: {category_obj.name}
+        - Available Services: {available_services}
         - Date: {created_booking["bookingDate"].strftime("%Y-%m-%d %H:%M")}
         - Type: Contact Required
+        - Special Requests: {created_booking.get("specialRequests", "None")}
         """
     else:
         service_list = ", ".join([s.name for s in tier_obj.services])
@@ -2089,7 +2138,7 @@ async def create_booking(
         - Category: {category_obj.name}
         - Services: {service_list}
         - Date: {created_booking["bookingDate"].strftime("%Y-%m-%d %H:%M")}
-        - Amount: ₦{tier_obj.price}
+        - Amount: ₦{tier_obj.price:,.2f}
         - Payment Required: Yes
         - Payment URL: {payment_url or "Generation failed"}
         """
@@ -2117,7 +2166,6 @@ async def create_booking(
         service=service_obj,
         tier=tier_obj
     )
-
 
 @app.get("/bookings", response_model=List[Booking])
 async def get_bookings(
