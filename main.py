@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, status, Request, File, UploadFile, Form
+from fastapi import FastAPI, Depends, HTTPException, status, Request, File, UploadFile, Form, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.responses import JSONResponse
@@ -747,6 +747,26 @@ class GalleryImage(GalleryImageBase):
     class Config:
         orm_mode = True
 
+class BookingReschedule(BaseModel):
+    new_booking_date: datetime
+    reason: Optional[str] = None
+
+class BookingCancellation(BaseModel):
+    reason: Optional[str] = None
+
+class UserBookingStats(BaseModel):
+    total_bookings: int
+    pending_bookings: int
+    confirmed_bookings: int
+    completed_bookings: int
+    cancelled_bookings: int
+    total_spent: float
+    upcoming_bookings: int
+
+class BookingHistory(BaseModel):
+    booking: Booking
+    status_history: List[Dict[str, Any]] = []
+
 
 
 
@@ -1448,6 +1468,931 @@ async def update_user(
         createdAt=updated_user.createdAt,
         updatedAt=updated_user.updatedAt
     )
+
+
+@app.get("/users/me/bookings", response_model=List[Booking])
+async def get_my_bookings(
+        skip: int = 0,
+        limit: int = 100,
+        status: Optional[str] = Query(None, description="Filter by booking status"),
+        booking_type: Optional[BookingType] = Query(None, description="Filter by booking type"),
+        date_from: Optional[datetime] = Query(None, description="Filter bookings from this date"),
+        date_to: Optional[datetime] = Query(None, description="Filter bookings to this date"),
+        current_user: UserInDB = Depends(get_current_active_user)
+):
+    """Get current user's bookings with filtering options"""
+    try:
+        query = {"userId": str(current_user.id)}
+
+        # Apply filters
+        if status:
+            query["status"] = status
+        if booking_type:
+            query["booking_type"] = booking_type
+        if date_from or date_to:
+            date_filter = {}
+            if date_from:
+                date_filter["$gte"] = date_from
+            if date_to:
+                date_filter["$lte"] = date_to
+            query["bookingDate"] = date_filter
+
+        # Sort by booking date (newest first)
+        bookings = list(
+            db.bookings.find(query)
+            .sort("bookingDate", -1)
+            .skip(skip)
+            .limit(limit)
+        )
+
+        result = []
+        for booking in bookings:
+            try:
+                service_obj = None
+                tier_obj = None
+
+                # Get service details if serviceId exists
+                if booking.get("serviceId"):
+                    service = db.services.find_one({"_id": ObjectId(booking["serviceId"])})
+                    if service:
+                        # Get category for service
+                        category = None
+                        if service.get("category_id"):
+                            category_doc = db.service_categories.find_one({"_id": ObjectId(service["category_id"])})
+                            if category_doc:
+                                category = ServiceCategory(
+                                    id=str(category_doc["_id"]),
+                                    name=category_doc["name"],
+                                    description=category_doc["description"],
+                                    category_type=category_doc["category_type"],
+                                    image=category_doc.get("image"),
+                                    is_active=category_doc["is_active"],
+                                    created_at=category_doc["created_at"],
+                                    updated_at=category_doc["updated_at"],
+                                    tiers=[],
+                                    services=[]
+                                )
+
+                        service_obj = Service(
+                            id=str(service["_id"]),
+                            name=service["name"],
+                            description=service["description"],
+                            image=service.get("image"),
+                            duration=service["duration"],
+                            isAvailable=service["isAvailable"],
+                            features=service.get("features", []),
+                            requirements=service.get("requirements", []),
+                            category_id=service.get("category_id"),
+                            tier_id=service.get("tier_id"),
+                            createdAt=service["createdAt"],
+                            updatedAt=service["updatedAt"],
+                            category=category
+                        )
+
+                # Get tier details if tierId exists
+                if booking.get("tierId"):
+                    tier = db.service_tiers.find_one({"_id": ObjectId(booking["tierId"])})
+                    if tier:
+                        # Get category for tier
+                        category = None
+                        if tier.get("category_id"):
+                            category_doc = db.service_categories.find_one({"_id": ObjectId(tier["category_id"])})
+                            if category_doc:
+                                category = ServiceCategory(
+                                    id=str(category_doc["_id"]),
+                                    name=category_doc["name"],
+                                    description=category_doc["description"],
+                                    category_type=category_doc["category_type"],
+                                    image=category_doc.get("image"),
+                                    is_active=category_doc["is_active"],
+                                    created_at=category_doc["created_at"],
+                                    updated_at=category_doc["updated_at"],
+                                    tiers=[],
+                                    services=[]
+                                )
+
+                        # Get services for this tier
+                        tier_services = list(db.services.find({"tier_id": booking["tierId"]}))
+                        tier_service_objects = []
+                        for service in tier_services:
+                            tier_service_objects.append(
+                                Service(
+                                    id=str(service["_id"]),
+                                    name=service["name"],
+                                    description=service["description"],
+                                    image=service.get("image"),
+                                    duration=service["duration"],
+                                    isAvailable=service["isAvailable"],
+                                    features=service.get("features", []),
+                                    requirements=service.get("requirements", []),
+                                    category_id=service.get("category_id"),
+                                    tier_id=service.get("tier_id"),
+                                    createdAt=service["createdAt"],
+                                    updatedAt=service["updatedAt"]
+                                )
+                            )
+
+                        tier_obj = ServiceTier(
+                            id=str(tier["_id"]),
+                            name=tier["name"],
+                            description=tier["description"],
+                            price=tier["price"],
+                            category_id=tier["category_id"],
+                            image=tier.get("image"),
+                            features=tier.get("features", []),
+                            is_popular=tier.get("is_popular", False),
+                            is_available=tier.get("is_available", True),
+                            created_at=tier["created_at"],
+                            updated_at=tier["updated_at"],
+                            services=tier_service_objects,
+                            category=category
+                        )
+
+                result.append(
+                    Booking(
+                        id=str(booking["_id"]),
+                        userId=booking["userId"],
+                        serviceId=booking.get("serviceId"),
+                        tierId=booking.get("tierId"),
+                        bookingDate=booking["bookingDate"],
+                        status=booking["status"],
+                        specialRequests=booking.get("specialRequests"),
+                        booking_type=booking.get("booking_type", BookingType.CONSULTATION),
+                        contact_preference=booking.get("contact_preference"),
+                        payment_required=booking.get("payment_required", False),
+                        payment_amount=booking.get("payment_amount"),
+                        payment_url=booking.get("payment_url"),
+                        payment_status=booking.get("payment_status", PaymentStatus.PENDING),
+                        payment_reference=booking.get("payment_reference"),
+                        flutterwave_tx_ref=booking.get("flutterwave_tx_ref"),
+                        createdAt=booking["createdAt"],
+                        updatedAt=booking["updatedAt"],
+                        service=service_obj,
+                        tier=tier_obj
+                    )
+                )
+            except Exception as e:
+                logger.error(f"Error processing booking {booking.get('_id')}: {e}")
+                continue
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Error fetching user bookings: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch bookings"
+        )
+
+
+@app.get("/users/me/bookings/{booking_id}", response_model=Booking)
+async def get_my_booking_details(
+        booking_id: str,
+        current_user: UserInDB = Depends(get_current_active_user)
+):
+    """Get detailed information about a specific booking"""
+    try:
+        booking = db.bookings.find_one({
+            "_id": ObjectId(booking_id),
+            "userId": str(current_user.id)
+        })
+
+        if not booking:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Booking not found"
+            )
+
+        # Get service and tier details (same logic as above)
+        service_obj = None
+        tier_obj = None
+
+        if booking.get("serviceId"):
+            service = db.services.find_one({"_id": ObjectId(booking["serviceId"])})
+            if service:
+                category = None
+                if service.get("category_id"):
+                    category_doc = db.service_categories.find_one({"_id": ObjectId(service["category_id"])})
+                    if category_doc:
+                        category = ServiceCategory(
+                            id=str(category_doc["_id"]),
+                            name=category_doc["name"],
+                            description=category_doc["description"],
+                            category_type=category_doc["category_type"],
+                            image=category_doc.get("image"),
+                            is_active=category_doc["is_active"],
+                            created_at=category_doc["created_at"],
+                            updated_at=category_doc["updated_at"],
+                            tiers=[],
+                            services=[]
+                        )
+
+                service_obj = Service(
+                    id=str(service["_id"]),
+                    name=service["name"],
+                    description=service["description"],
+                    image=service.get("image"),
+                    duration=service["duration"],
+                    isAvailable=service["isAvailable"],
+                    features=service.get("features", []),
+                    requirements=service.get("requirements", []),
+                    category_id=service.get("category_id"),
+                    tier_id=service.get("tier_id"),
+                    createdAt=service["createdAt"],
+                    updatedAt=service["updatedAt"],
+                    category=category
+                )
+
+        if booking.get("tierId"):
+            tier = db.service_tiers.find_one({"_id": ObjectId(booking["tierId"])})
+            if tier:
+                category = None
+                if tier.get("category_id"):
+                    category_doc = db.service_categories.find_one({"_id": ObjectId(tier["category_id"])})
+                    if category_doc:
+                        category = ServiceCategory(
+                            id=str(category_doc["_id"]),
+                            name=category_doc["name"],
+                            description=category_doc["description"],
+                            category_type=category_doc["category_type"],
+                            image=category_doc.get("image"),
+                            is_active=category_doc["is_active"],
+                            created_at=category_doc["created_at"],
+                            updated_at=category_doc["updated_at"],
+                            tiers=[],
+                            services=[]
+                        )
+
+                tier_services = list(db.services.find({"tier_id": booking["tierId"]}))
+                tier_service_objects = []
+                for service in tier_services:
+                    tier_service_objects.append(
+                        Service(
+                            id=str(service["_id"]),
+                            name=service["name"],
+                            description=service["description"],
+                            image=service.get("image"),
+                            duration=service["duration"],
+                            isAvailable=service["isAvailable"],
+                            features=service.get("features", []),
+                            requirements=service.get("requirements", []),
+                            category_id=service.get("category_id"),
+                            tier_id=service.get("tier_id"),
+                            createdAt=service["createdAt"],
+                            updatedAt=service["updatedAt"]
+                        )
+                    )
+
+                tier_obj = ServiceTier(
+                    id=str(tier["_id"]),
+                    name=tier["name"],
+                    description=tier["description"],
+                    price=tier["price"],
+                    category_id=tier["category_id"],
+                    image=tier.get("image"),
+                    features=tier.get("features", []),
+                    is_popular=tier.get("is_popular", False),
+                    is_available=tier.get("is_available", True),
+                    created_at=tier["created_at"],
+                    updated_at=tier["updated_at"],
+                    services=tier_service_objects,
+                    category=category
+                )
+
+        return Booking(
+            id=str(booking["_id"]),
+            userId=booking["userId"],
+            serviceId=booking.get("serviceId"),
+            tierId=booking.get("tierId"),
+            bookingDate=booking["bookingDate"],
+            status=booking["status"],
+            specialRequests=booking.get("specialRequests"),
+            booking_type=booking.get("booking_type", BookingType.CONSULTATION),
+            contact_preference=booking.get("contact_preference"),
+            payment_required=booking.get("payment_required", False),
+            payment_amount=booking.get("payment_amount"),
+            payment_url=booking.get("payment_url"),
+            payment_status=booking.get("payment_status", PaymentStatus.PENDING),
+            payment_reference=booking.get("payment_reference"),
+            flutterwave_tx_ref=booking.get("flutterwave_tx_ref"),
+            createdAt=booking["createdAt"],
+            updatedAt=booking["updatedAt"],
+            service=service_obj,
+            tier=tier_obj
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching booking details: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch booking details"
+        )
+
+
+@app.get("/users/me/bookings/stats", response_model=UserBookingStats)
+async def get_my_booking_stats(
+        current_user: UserInDB = Depends(get_current_active_user)
+):
+    """Get user's booking statistics"""
+    try:
+        user_id = str(current_user.id)
+
+        # Get all user bookings
+        all_bookings = list(db.bookings.find({"userId": user_id}))
+
+        # Calculate stats
+        total_bookings = len(all_bookings)
+        pending_bookings = len([b for b in all_bookings if b["status"] == "pending"])
+        confirmed_bookings = len([b for b in all_bookings if b["status"] == "confirmed"])
+        completed_bookings = len([b for b in all_bookings if b["status"] == "completed"])
+        cancelled_bookings = len([b for b in all_bookings if b["status"] == "cancelled"])
+
+        # Calculate total spent (only for confirmed/completed bookings with successful payments)
+        total_spent = 0.0
+        for booking in all_bookings:
+            if (booking["status"] in ["confirmed", "completed"] and
+                    booking.get("payment_status") == "successful" and
+                    booking.get("payment_amount")):
+                total_spent += booking["payment_amount"]
+
+        # Count upcoming bookings (future bookings that are confirmed)
+        now = datetime.utcnow()
+        upcoming_bookings = len([
+            b for b in all_bookings
+            if b["status"] == "confirmed" and b["bookingDate"] > now
+        ])
+
+        return UserBookingStats(
+            total_bookings=total_bookings,
+            pending_bookings=pending_bookings,
+            confirmed_bookings=confirmed_bookings,
+            completed_bookings=completed_bookings,
+            cancelled_bookings=cancelled_bookings,
+            total_spent=total_spent,
+            upcoming_bookings=upcoming_bookings
+        )
+
+    except Exception as e:
+        logger.error(f"Error calculating booking stats: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to calculate booking statistics"
+        )
+
+
+@app.put("/users/me/bookings/{booking_id}/cancel")
+async def cancel_my_booking(
+        booking_id: str,
+        cancellation: BookingCancellation,
+        current_user: UserInDB = Depends(get_current_active_user)
+):
+    """Cancel a user's booking"""
+    try:
+        booking = db.bookings.find_one({
+            "_id": ObjectId(booking_id),
+            "userId": str(current_user.id)
+        })
+
+        if not booking:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Booking not found"
+            )
+
+        # Check if booking can be cancelled
+        if booking["status"] in ["completed", "cancelled"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot cancel a {booking['status']} booking"
+            )
+
+        # Check cancellation policy (e.g., 24 hours before booking)
+        booking_date = booking["bookingDate"]
+        if isinstance(booking_date, str):
+            booking_date = datetime.fromisoformat(booking_date.replace('Z', '+00:00'))
+
+        time_until_booking = booking_date - datetime.utcnow()
+        if time_until_booking < timedelta(hours=24):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot cancel booking less than 24 hours before the scheduled time"
+            )
+
+        # Update booking status
+        update_data = {
+            "status": "cancelled",
+            "updatedAt": datetime.utcnow(),
+            "cancellation_reason": cancellation.reason,
+            "cancelled_at": datetime.utcnow()
+        }
+
+        # If payment was made, mark for refund processing
+        if (booking.get("payment_status") == "successful" and
+                booking.get("payment_amount", 0) > 0):
+            update_data["refund_status"] = "pending"
+            update_data["refund_amount"] = booking["payment_amount"]
+
+        result = db.bookings.update_one(
+            {"_id": ObjectId(booking_id)},
+            {"$set": update_data}
+        )
+
+        if result.modified_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Failed to cancel booking"
+            )
+
+        # Send cancellation email
+        service_name = "Unknown Service"
+        if booking.get("serviceId"):
+            service = db.services.find_one({"_id": ObjectId(booking["serviceId"])})
+            if service:
+                service_name = service["name"]
+        elif booking.get("tierId"):
+            tier = db.service_tiers.find_one({"_id": ObjectId(booking["tierId"])})
+            if tier:
+                service_name = tier["name"]
+
+        cancellation_html = f"""
+        <html>
+            <body>
+                <h1>Booking Cancelled</h1>
+                <p>Dear {current_user.firstName},</p>
+                <p>Your booking for {service_name} has been successfully cancelled.</p>
+                <p>Booking Details:</p>
+                <ul>
+                    <li>Service: {service_name}</li>
+                    <li>Original Date: {booking_date.strftime("%Y-%m-%d %H:%M")}</li>
+                    <li>Cancellation Date: {datetime.utcnow().strftime("%Y-%m-%d %H:%M")}</li>
+                    <li>Reason: {cancellation.reason or "Not specified"}</li>
+                </ul>
+                {f"<p>A refund of ₦{booking.get('payment_amount', 0):,.2f} will be processed within 5-7 business days.</p>" if booking.get('payment_amount', 0) > 0 else ""}
+                <p>We're sorry to see this booking cancelled. Feel free to book again anytime.</p>
+                <p>Best regards,<br>The Naija Concierge Team</p>
+            </body>
+        </html>
+        """
+
+        send_email(
+            current_user.email,
+            "Booking Cancelled - Naija Concierge",
+            cancellation_html
+        )
+
+        # Notify admin
+        admin_notification = f"""
+        Booking cancelled by user:
+        - User: {current_user.firstName} {current_user.lastName}
+        - Service: {service_name}
+        - Original Date: {booking_date.strftime("%Y-%m-%d %H:%M")}
+        - Reason: {cancellation.reason or "Not specified"}
+        - Refund Required: {"Yes" if booking.get('payment_amount', 0) > 0 else "No"}
+        - Amount: ₦{booking.get('payment_amount', 0):,.2f}
+        """
+
+        send_admin_notification("Booking Cancelled by User", admin_notification)
+
+        return {"message": "Booking cancelled successfully"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error cancelling booking: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to cancel booking"
+        )
+
+
+@app.put("/users/me/bookings/{booking_id}/reschedule")
+async def reschedule_my_booking(
+        booking_id: str,
+        reschedule: BookingReschedule,
+        current_user: UserInDB = Depends(get_current_active_user)
+):
+    """Reschedule a user's booking"""
+    try:
+        booking = db.bookings.find_one({
+            "_id": ObjectId(booking_id),
+            "userId": str(current_user.id)
+        })
+
+        if not booking:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Booking not found"
+            )
+
+        # Check if booking can be rescheduled
+        if booking["status"] in ["completed", "cancelled"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot reschedule a {booking['status']} booking"
+            )
+
+        # Validate new booking date
+        if reschedule.new_booking_date <= datetime.utcnow():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="New booking date must be in the future"
+            )
+
+        # Check rescheduling policy (e.g., 24 hours before original booking)
+        original_booking_date = booking["bookingDate"]
+        if isinstance(original_booking_date, str):
+            original_booking_date = datetime.fromisoformat(original_booking_date.replace('Z', '+00:00'))
+
+        time_until_original_booking = original_booking_date - datetime.utcnow()
+        if time_until_original_booking < timedelta(hours=24):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot reschedule booking less than 24 hours before the original scheduled time"
+            )
+
+        # Update booking
+        update_data = {
+            "bookingDate": reschedule.new_booking_date,
+            "updatedAt": datetime.utcnow(),
+            "reschedule_reason": reschedule.reason,
+            "original_booking_date": original_booking_date,
+            "rescheduled_at": datetime.utcnow()
+        }
+
+        result = db.bookings.update_one(
+            {"_id": ObjectId(booking_id)},
+            {"$set": update_data}
+        )
+
+        if result.modified_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Failed to reschedule booking"
+            )
+
+        # Send reschedule confirmation email
+        service_name = "Unknown Service"
+        if booking.get("serviceId"):
+            service = db.services.find_one({"_id": ObjectId(booking["serviceId"])})
+            if service:
+                service_name = service["name"]
+        elif booking.get("tierId"):
+            tier = db.service_tiers.find_one({"_id": ObjectId(booking["tierId"])})
+            if tier:
+                service_name = tier["name"]
+
+        reschedule_html = f"""
+        <html>
+            <body>
+                <h1>Booking Rescheduled</h1>
+                <p>Dear {current_user.firstName},</p>
+                <p>Your booking for {service_name} has been successfully rescheduled.</p>
+                <p>Booking Details:</p>
+                <ul>
+                    <li>Service: {service_name}</li>
+                    <li>Original Date: {original_booking_date.strftime("%Y-%m-%d %H:%M")}</li>
+                    <li>New Date: {reschedule.new_booking_date.strftime("%Y-%m-%d %H:%M")}</li>
+                    <li>Reason: {reschedule.reason or "Not specified"}</li>
+                </ul>
+                <p>We'll see you at the new scheduled time!</p>
+                <p>Best regards,<br>The Naija Concierge Team</p>
+            </body>
+        </html>
+        """
+
+        send_email(
+            current_user.email,
+            "Booking Rescheduled - Naija Concierge",
+            reschedule_html
+        )
+
+        # Notify admin
+        admin_notification = f"""
+        Booking rescheduled by user:
+        - User: {current_user.firstName} {current_user.lastName}
+        - Service: {service_name}
+        - Original Date: {original_booking_date.strftime("%Y-%m-%d %H:%M")}
+        - New Date: {reschedule.new_booking_date.strftime("%Y-%m-%d %H:%M")}
+        - Reason: {reschedule.reason or "Not specified"}
+        """
+
+        send_admin_notification("Booking Rescheduled by User", admin_notification)
+
+        return {"message": "Booking rescheduled successfully"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error rescheduling booking: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to reschedule booking"
+        )
+
+
+@app.get("/users/me/bookings/upcoming", response_model=List[Booking])
+async def get_my_upcoming_bookings(
+        limit: int = 10,
+        current_user: UserInDB = Depends(get_current_active_user)
+):
+    """Get user's upcoming bookings"""
+    try:
+        now = datetime.utcnow()
+
+        bookings = list(
+            db.bookings.find({
+                "userId": str(current_user.id),
+                "bookingDate": {"$gt": now},
+                "status": {"$in": ["pending", "confirmed"]}
+            })
+            .sort("bookingDate", 1)  # Sort by date ascending (earliest first)
+            .limit(limit)
+        )
+
+        result = []
+        for booking in bookings:
+            try:
+                service_obj = None
+                tier_obj = None
+
+                if booking.get("serviceId"):
+                    service = db.services.find_one({"_id": ObjectId(booking["serviceId"])})
+                    if service:
+                        service_obj = Service(
+                            id=str(service["_id"]),
+                            name=service["name"],
+                            description=service["description"],
+                            image=service.get("image"),
+                            duration=service["duration"],
+                            isAvailable=service["isAvailable"],
+                            features=service.get("features", []),
+                            requirements=service.get("requirements", []),
+                            category_id=service.get("category_id"),
+                            tier_id=service.get("tier_id"),
+                            createdAt=service["createdAt"],
+                            updatedAt=service["updatedAt"]
+                        )
+
+                if booking.get("tierId"):
+                    tier = db.service_tiers.find_one({"_id": ObjectId(booking["tierId"])})
+                    if tier:
+                        tier_obj = ServiceTier(
+                            id=str(tier["_id"]),
+                            name=tier["name"],
+                            description=tier["description"],
+                            price=tier["price"],
+                            category_id=tier["category_id"],
+                            image=tier.get("image"),
+                            features=tier.get("features", []),
+                            is_popular=tier.get("is_popular", False),
+                            is_available=tier.get("is_available", True),
+                            created_at=tier["created_at"],
+                            updated_at=tier["updated_at"],
+                            services=[]
+                        )
+
+                result.append(
+                    Booking(
+                        id=str(booking["_id"]),
+                        userId=booking["userId"],
+                        serviceId=booking.get("serviceId"),
+                        tierId=booking.get("tierId"),
+                        bookingDate=booking["bookingDate"],
+                        status=booking["status"],
+                        specialRequests=booking.get("specialRequests"),
+                        booking_type=booking.get("booking_type", BookingType.CONSULTATION),
+                        contact_preference=booking.get("contact_preference"),
+                        payment_required=booking.get("payment_required", False),
+                        payment_amount=booking.get("payment_amount"),
+                        payment_url=booking.get("payment_url"),
+                        payment_status=booking.get("payment_status", PaymentStatus.PENDING),
+                        payment_reference=booking.get("payment_reference"),
+                        flutterwave_tx_ref=booking.get("flutterwave_tx_ref"),
+                        createdAt=booking["createdAt"],
+                        updatedAt=booking["updatedAt"],
+                        service=service_obj,
+                        tier=tier_obj
+                    )
+                )
+            except Exception as e:
+                logger.error(f"Error processing upcoming booking {booking.get('_id')}: {e}")
+                continue
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Error fetching upcoming bookings: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch upcoming bookings"
+        )
+
+
+@app.get("/users/me/bookings/history", response_model=List[Booking])
+async def get_my_booking_history(
+        skip: int = 0,
+        limit: int = 50,
+        current_user: UserInDB = Depends(get_current_active_user)
+):
+    """Get user's booking history (completed and cancelled bookings)"""
+    try:
+        bookings = list(
+            db.bookings.find({
+                "userId": str(current_user.id),
+                "status": {"$in": ["completed", "cancelled"]}
+            })
+            .sort("updatedAt", -1)  # Sort by last update (newest first)
+            .skip(skip)
+            .limit(limit)
+        )
+
+        result = []
+        for booking in bookings:
+            try:
+                service_obj = None
+                tier_obj = None
+
+                if booking.get("serviceId"):
+                    service = db.services.find_one({"_id": ObjectId(booking["serviceId"])})
+                    if service:
+                        service_obj = Service(
+                            id=str(service["_id"]),
+                            name=service["name"],
+                            description=service["description"],
+                            image=service.get("image"),
+                            duration=service["duration"],
+                            isAvailable=service["isAvailable"],
+                            features=service.get("features", []),
+                            requirements=service.get("requirements", []),
+                            category_id=service.get("category_id"),
+                            tier_id=service.get("tier_id"),
+                            createdAt=service["createdAt"],
+                            updatedAt=service["updatedAt"]
+                        )
+
+                if booking.get("tierId"):
+                    tier = db.service_tiers.find_one({"_id": ObjectId(booking["tierId"])})
+                    if tier:
+                        tier_obj = ServiceTier(
+                            id=str(tier["_id"]),
+                            name=tier["name"],
+                            description=tier["description"],
+                            price=tier["price"],
+                            category_id=tier["category_id"],
+                            image=tier.get("image"),
+                            features=tier.get("features", []),
+                            is_popular=tier.get("is_popular", False),
+                            is_available=tier.get("is_available", True),
+                            created_at=tier["created_at"],
+                            updated_at=tier["updated_at"],
+                            services=[]
+                        )
+
+                result.append(
+                    Booking(
+                        id=str(booking["_id"]),
+                        userId=booking["userId"],
+                        serviceId=booking.get("serviceId"),
+                        tierId=booking.get("tierId"),
+                        bookingDate=booking["bookingDate"],
+                        status=booking["status"],
+                        specialRequests=booking.get("specialRequests"),
+                        booking_type=booking.get("booking_type", BookingType.CONSULTATION),
+                        contact_preference=booking.get("contact_preference"),
+                        payment_required=booking.get("payment_required", False),
+                        payment_amount=booking.get("payment_amount"),
+                        payment_url=booking.get("payment_url"),
+                        payment_status=booking.get("payment_status", PaymentStatus.PENDING),
+                        payment_reference=booking.get("payment_reference"),
+                        flutterwave_tx_ref=booking.get("flutterwave_tx_ref"),
+                        createdAt=booking["createdAt"],
+                        updatedAt=booking["updatedAt"],
+                        service=service_obj,
+                        tier=tier_obj
+                    )
+                )
+            except Exception as e:
+                logger.error(f"Error processing booking history {booking.get('_id')}: {e}")
+                continue
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Error fetching booking history: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch booking history"
+        )
+
+
+@app.post("/users/me/bookings/{booking_id}/regenerate-payment")
+async def regenerate_payment_url(
+        booking_id: str,
+        preferred_currency: str = "NGN",
+        current_user: UserInDB = Depends(get_current_active_user)
+):
+    """Regenerate payment URL for a booking with failed/expired payment"""
+    try:
+        booking = db.bookings.find_one({
+            "_id": ObjectId(booking_id),
+            "userId": str(current_user.id)
+        })
+
+        if not booking:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Booking not found"
+            )
+
+        # Check if booking requires payment and payment is not successful
+        if not booking.get("payment_required"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="This booking does not require payment"
+            )
+
+        if booking.get("payment_status") == "successful":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Payment has already been completed for this booking"
+            )
+
+        if booking["status"] in ["completed", "cancelled"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot regenerate payment for {booking['status']} booking"
+            )
+
+        # Get original amount
+        original_amount = booking.get("payment_amount", 0)
+        if original_amount <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid payment amount"
+            )
+
+        # Convert amount if different currency requested
+        payment_amount = original_amount
+        if preferred_currency != "NGN":
+            try:
+                payment_amount = await convert_price(original_amount, "NGN", preferred_currency)
+            except Exception as e:
+                logger.error(f"Currency conversion failed: {e}")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Failed to convert currency"
+                )
+
+        # Generate new payment URL
+        try:
+            payment_url = generate_flutterwave_payment_url(
+                {
+                    "id": str(booking["_id"]),
+                    "original_amount": original_amount
+                },
+                current_user.__dict__,
+                payment_amount,
+                preferred_currency
+            )
+
+            # Update booking with new payment URL
+            db.bookings.update_one(
+                {"_id": ObjectId(booking_id)},
+                {"$set": {
+                    "payment_url": payment_url,
+                    "payment_currency": preferred_currency,
+                    "payment_amount_converted": payment_amount,
+                    "updatedAt": datetime.utcnow()
+                }}
+            )
+
+            return {
+                "payment_url": payment_url,
+                "amount": payment_amount,
+                "currency": preferred_currency,
+                "original_amount": original_amount,
+                "message": "Payment URL regenerated successfully"
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to generate payment URL: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to generate payment URL"
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error regenerating payment URL: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to regenerate payment URL"
+        )
+
+
 
 @app.delete("/users/{user_id}")
 async def delete_user(
@@ -4322,6 +5267,8 @@ async def get_bookings(
             logger.error(f"Error processing booking: {e}")
 
     return result
+
+
 
 
 # Enhanced Airtable booking with tier support and payment integration
