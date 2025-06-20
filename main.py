@@ -77,11 +77,11 @@ AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME")
 
+# Flutterwave configuration
 FLUTTERWAVE_SECRET_KEY = os.getenv("FLUTTERWAVE_SECRET_KEY")
 FLUTTERWAVE_BASE_URL = "https://api.flutterwave.com/v3"
 FLUTTERWAVE_SECRET_HASH = os.getenv("FLUTTERWAVE_SECRET_HASH")
-EXCHANGE_RATE_API_KEY = os.getenv("EXCHANGE_RATE_API_KEY")
-EXCHANGE_RATE_BASE_URL = "https://v6.exchangerate-api.com/v6"
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
 # JWT configuration
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key")
@@ -104,31 +104,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Email configuration
-smtp_server = "smtp.gmail.com"
-smtp_port = 465
-email_address = "ahuekweprinceugo@gmail.com"
-password = os.getenv("GMAIL_PASS")
-recipient_email = "ahuekweprinceugo@gmail.com"
-
-print(password)
-subject = "Test Email from Python"
-message_text = "This is a test email sent using smtplib and a context manager."
-
-msg = MIMEText(message_text)
-msg['Subject'] = subject
-msg['From'] = email_address
-msg['To'] = recipient_email
-
-try:
-    with smtplib.SMTP_SSL(smtp_server, smtp_port) as server:
-        server.ehlo()
-        server.login(email_address, password)
-        server.sendmail(email_address, [recipient_email], msg.as_string())
-        print("Email sent successfully!")
-except Exception as e:
-    print(f"Error sending email: {e}")
 
 
 class PyObjectId(ObjectId):
@@ -161,6 +136,13 @@ class BookingType(str, Enum):
     CONSULTATION = "consultation"  # Contact-only booking
     TIER_BOOKING = "tier_booking"  # Tier-based booking with payment
     MEMBERSHIP_SERVICE = "membership_service"  # Membership required
+
+
+class PaymentStatus(str, Enum):
+    PENDING = "pending"
+    SUCCESSFUL = "successful"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class MembershipTier(str, Enum):
@@ -386,6 +368,59 @@ class Service(ServiceBase):
         arbitrary_types_allowed = True
 
 
+# Enhanced Booking Models with Payment Integration
+class BookingBase(BaseModel):
+    userId: str
+    serviceId: Optional[str] = None  # For individual service bookings
+    tierId: Optional[str] = None  # For tier bookings
+    bookingDate: datetime
+    status: str = "pending"
+    specialRequests: Optional[str] = None
+    booking_type: BookingType
+    contact_preference: Optional[str] = "email"
+    payment_required: bool = False
+    payment_amount: Optional[float] = None
+    # Enhanced payment fields
+    payment_url: Optional[str] = None
+    payment_status: PaymentStatus = PaymentStatus.PENDING
+    payment_reference: Optional[str] = None
+    flutterwave_tx_ref: Optional[str] = None
+
+
+class BookingCreate(BookingBase):
+    pass
+
+
+class BookingUpdate(BaseModel):
+    bookingDate: Optional[datetime] = None
+    status: Optional[str] = None
+    specialRequests: Optional[str] = None
+    contact_preference: Optional[str] = None
+    payment_status: Optional[PaymentStatus] = None
+
+
+class BookingInDB(BookingBase):
+    id: PyObjectId = Field(default_factory=ObjectId, alias="_id")
+    createdAt: datetime = Field(default_factory=datetime.utcnow)
+    updatedAt: datetime = Field(default_factory=datetime.utcnow)
+
+    class Config:
+        arbitrary_types_allowed = True
+        json_encoders = {ObjectId: str}
+
+
+class Booking(BookingBase):
+    id: str
+    createdAt: datetime
+    updatedAt: datetime
+    service: Optional[Service] = None
+    tier: Optional[ServiceTier] = None
+
+    class Config:
+        arbitrary_types_allowed = True
+        json_encoders = {ObjectId: str}
+
+
 # Membership Models
 class MembershipBase(BaseModel):
     name: str
@@ -459,53 +494,6 @@ class UserMembership(UserMembershipBase):
     created_at: datetime
     updated_at: datetime
     membership: Optional[Membership] = None
-
-
-# Booking Models
-class BookingBase(BaseModel):
-    userId: str
-    serviceId: Optional[str] = None  # For individual service bookings
-    tierId: Optional[str] = None  # For tier bookings
-    bookingDate: datetime
-    status: str = "pending"
-    specialRequests: Optional[str] = None
-    booking_type: BookingType
-    contact_preference: Optional[str] = "email"
-    payment_required: bool = False
-    payment_amount: Optional[float] = None
-
-
-class BookingCreate(BookingBase):
-    pass
-
-
-class BookingUpdate(BaseModel):
-    bookingDate: Optional[datetime] = None
-    status: Optional[str] = None
-    specialRequests: Optional[str] = None
-    contact_preference: Optional[str] = None
-
-
-class BookingInDB(BookingBase):
-    id: PyObjectId = Field(default_factory=ObjectId, alias="_id")
-    createdAt: datetime = Field(default_factory=datetime.utcnow)
-    updatedAt: datetime = Field(default_factory=datetime.utcnow)
-
-    class Config:
-        arbitrary_types_allowed = True
-        json_encoders = {ObjectId: str}
-
-
-class Booking(BookingBase):
-    id: str
-    createdAt: datetime
-    updatedAt: datetime
-    service: Optional[Service] = None
-    tier: Optional[ServiceTier] = None
-
-    class Config:
-        arbitrary_types_allowed = True
-        json_encoders = {ObjectId: str}
 
 
 # Keep existing models (CRM, Package, etc.)
@@ -584,6 +572,34 @@ class NewsletterSubscriberInDB(NewsletterSubscriber):
         allow_population_by_field_name = True
         arbitrary_types_allowed = True
         json_encoders = {ObjectId: str}
+
+
+# Payment webhook models
+class FlutterwaveWebhookData(BaseModel):
+    id: int
+    tx_ref: str
+    flw_ref: str
+    device_fingerprint: str
+    amount: float
+    currency: str
+    charged_amount: float
+    app_fee: float
+    merchant_fee: float
+    processor_response: str
+    auth_model: str
+    ip: str
+    narration: str
+    status: str
+    payment_type: str
+    created_at: str
+    account_id: int
+    customer: Dict[str, Any]
+    meta: Optional[Dict[str, Any]] = None
+
+
+class FlutterwaveWebhook(BaseModel):
+    event: str
+    data: FlutterwaveWebhookData
 
 
 # Helper functions
@@ -801,6 +817,131 @@ def add_to_airtable(booking_data: Dict) -> Dict:
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to add to Airtable: {str(e)}"
         )
+
+
+# Flutterwave Payment Integration Functions
+def generate_flutterwave_payment_url(booking_data: Dict, user_data: Dict, amount: float) -> str:
+    """Generate Flutterwave payment URL for tier bookings"""
+    if not FLUTTERWAVE_SECRET_KEY:
+        logger.error("Flutterwave secret key not configured")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Payment service not configured"
+        )
+
+    try:
+        # Generate unique transaction reference
+        tx_ref = f"booking_{booking_data['id']}_{uuid.uuid4().hex[:8]}"
+
+        # Flutterwave payment payload
+        payment_payload = {
+            "tx_ref": tx_ref,
+            "amount": amount,
+            "currency": "NGN",
+            "redirect_url": f"{FRONTEND_URL}/booking/payment-success",
+            "payment_options": "card,banktransfer,ussd",
+            "customer": {
+                "email": user_data["email"],
+                "phonenumber": user_data.get("phone", ""),
+                "name": f"{user_data['firstName']} {user_data['lastName']}"
+            },
+            "customizations": {
+                "title": "Naija Concierge - Tier Booking",
+                "description": f"Payment for tier booking",
+                "logo": "https://your-logo-url.com/logo.png"
+            },
+            "meta": {
+                "booking_id": str(booking_data["id"]),
+                "user_id": user_data["id"],
+                "booking_type": "tier_booking"
+            }
+        }
+
+        headers = {
+            "Authorization": f"Bearer {FLUTTERWAVE_SECRET_KEY}",
+            "Content-Type": "application/json"
+        }
+
+        response = requests.post(
+            f"{FLUTTERWAVE_BASE_URL}/payments",
+            json=payment_payload,
+            headers=headers
+        )
+        response.raise_for_status()
+
+        payment_data = response.json()
+        if payment_data["status"] == "success":
+            # Update booking with transaction reference
+            db.bookings.update_one(
+                {"_id": ObjectId(booking_data["id"])},
+                {"$set": {"flutterwave_tx_ref": tx_ref}}
+            )
+            return payment_data["data"]["link"]
+        else:
+            logger.error(f"Payment URL generation failed: {payment_data}")
+            raise Exception(f"Payment URL generation failed: {payment_data}")
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Flutterwave API request error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to generate payment URL"
+        )
+    except Exception as e:
+        logger.error(f"Flutterwave payment URL generation error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to generate payment URL"
+        )
+
+
+def verify_flutterwave_payment(tx_ref: str) -> Dict:
+    """Verify payment with Flutterwave"""
+    if not FLUTTERWAVE_SECRET_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Payment service not configured"
+        )
+
+    try:
+        headers = {
+            "Authorization": f"Bearer {FLUTTERWAVE_SECRET_KEY}",
+            "Content-Type": "application/json"
+        }
+
+        response = requests.get(
+            f"{FLUTTERWAVE_BASE_URL}/transactions/verify_by_reference?tx_ref={tx_ref}",
+            headers=headers
+        )
+        response.raise_for_status()
+
+        return response.json()
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Flutterwave verification request error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to verify payment"
+        )
+
+
+def verify_webhook_signature(payload: str, signature: str) -> bool:
+    """Verify Flutterwave webhook signature"""
+    if not FLUTTERWAVE_SECRET_HASH:
+        logger.warning("Flutterwave secret hash not configured")
+        return True  # Skip verification if not configured
+
+    try:
+        expected_signature = hmac.new(
+            FLUTTERWAVE_SECRET_HASH.encode('utf-8'),
+            payload.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+
+        return hmac.compare_digest(expected_signature, signature)
+    except Exception as e:
+        logger.error(f"Error verifying webhook signature: {e}")
+        return False
 
 
 # Routes
@@ -1149,117 +1290,6 @@ async def create_service_category(
     )
 
 
-@app.put("/service-categories/{category_id}", response_model=ServiceCategory)
-async def update_service_category(
-        category_id: str,
-        category_update: ServiceCategoryUpdate,
-        current_user: UserInDB = Depends(get_admin_user)
-):
-    """Update a service category"""
-    try:
-        category = db.service_categories.find_one({"_id": ObjectId(category_id)})
-        if not category:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Service category not found"
-            )
-
-        update_data = category_update.dict(exclude_unset=True)
-
-        if update_data:
-            if "name" in update_data and not update_data["name"].strip():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Name cannot be empty"
-                )
-            if "description" in update_data and not update_data["description"].strip():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Description cannot be empty"
-                )
-
-            update_data["updated_at"] = datetime.utcnow()
-            result = db.service_categories.update_one(
-                {"_id": ObjectId(category_id)},
-                {"$set": update_data}
-            )
-
-            if result.modified_count == 0:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Service category update failed"
-                )
-
-        updated_category = db.service_categories.find_one({"_id": ObjectId(category_id)})
-
-        return ServiceCategory(
-            id=str(updated_category["_id"]),
-            name=updated_category["name"],
-            description=updated_category["description"],
-            category_type=updated_category["category_type"],
-            image=updated_category.get("image"),
-            is_active=updated_category["is_active"],
-            created_at=updated_category["created_at"],
-            updated_at=updated_category["updated_at"],
-            tiers=[],
-            services=[]
-        )
-    except Exception as e:
-        logger.error(f"Error updating service category: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Service category update failed"
-        )
-
-
-@app.delete("/service-categories/{category_id}")
-async def delete_service_category(
-        category_id: str,
-        current_user: UserInDB = Depends(get_admin_user)
-):
-    """Delete a service category and its associated tiers/services"""
-    try:
-        category = db.service_categories.find_one({"_id": ObjectId(category_id)})
-        if not category:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Service category not found"
-            )
-
-        # Check for existing bookings
-        bookings = db.bookings.find_one({
-            "$or": [
-                {"serviceId": {"$in": [str(s["_id"]) for s in db.services.find({"category_id": category_id})]}},
-                {"tierId": {"$in": [str(t["_id"]) for t in db.service_tiers.find({"category_id": category_id})]}}
-            ]
-        })
-        if bookings:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Cannot delete category with existing bookings"
-            )
-
-        # Delete associated services and tiers
-        db.services.delete_many({"category_id": category_id})
-        db.service_tiers.delete_many({"category_id": category_id})
-
-        result = db.service_categories.delete_one({"_id": ObjectId(category_id)})
-
-        if result.deleted_count == 0:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Service category deletion failed"
-            )
-
-        return {"message": "Service category and associated data deleted successfully"}
-    except Exception as e:
-        logger.error(f"Error deleting service category: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Service category deletion failed"
-        )
-
-
 @app.post("/service-categories/image")
 async def upload_service_category_image(
         file: UploadFile = File(...),
@@ -1481,140 +1511,6 @@ async def create_service_tier(
         updated_at=created_tier["updated_at"],
         services=[]
     )
-
-
-@app.put("/service-tiers/{tier_id}", response_model=ServiceTier)
-async def update_service_tier(
-        tier_id: str,
-        tier_update: ServiceTierUpdate,
-        current_user: UserInDB = Depends(get_admin_user)
-):
-    """Update a service tier"""
-    try:
-        tier = db.service_tiers.find_one({"_id": ObjectId(tier_id)})
-        if not tier:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Service tier not found"
-            )
-
-        update_data = tier_update.dict(exclude_unset=True)
-
-        if update_data:
-            if "name" in update_data and not update_data["name"].strip():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Name cannot be empty"
-                )
-            if "description" in update_data and not update_data["description"].strip():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Description cannot be empty"
-                )
-            if "price" in update_data and update_data["price"] < 0:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Price cannot be negative"
-                )
-
-            update_data["updated_at"] = datetime.utcnow()
-            result = db.service_tiers.update_one(
-                {"_id": ObjectId(tier_id)},
-                {"$set": update_data}
-            )
-
-            if result.modified_count == 0:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Service tier update failed"
-                )
-
-        updated_tier = db.service_tiers.find_one({"_id": ObjectId(tier_id)})
-
-        # Get services for this tier
-        services = list(db.services.find({"tier_id": tier_id}))
-        service_objects = []
-
-        for service in services:
-            service_objects.append(
-                Service(
-                    id=str(service["_id"]),
-                    name=service["name"],
-                    description=service["description"],
-                    image=service.get("image"),
-                    duration=service["duration"],
-                    isAvailable=service["isAvailable"],
-                    features=service.get("features", []),
-                    requirements=service.get("requirements", []),
-                    category_id=service.get("category_id"),
-                    tier_id=service.get("tier_id"),
-                    createdAt=service["createdAt"],
-                    updatedAt=service["updatedAt"]
-                )
-            )
-
-        return ServiceTier(
-            id=str(updated_tier["_id"]),
-            name=updated_tier["name"],
-            description=updated_tier["description"],
-            price=updated_tier["price"],
-            category_id=updated_tier["category_id"],
-            image=updated_tier.get("image"),
-            features=updated_tier.get("features", []),
-            is_popular=updated_tier.get("is_popular", False),
-            is_available=updated_tier.get("is_available", True),
-            created_at=updated_tier["created_at"],
-            updated_at=updated_tier["updated_at"],
-            services=service_objects
-        )
-    except Exception as e:
-        logger.error(f"Error updating service tier: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Service tier update failed"
-        )
-
-
-@app.delete("/service-tiers/{tier_id}")
-async def delete_service_tier(
-        tier_id: str,
-        current_user: UserInDB = Depends(get_admin_user)
-):
-    """Delete a service tier and its associated services"""
-    try:
-        tier = db.service_tiers.find_one({"_id": ObjectId(tier_id)})
-        if not tier:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Service tier not found"
-            )
-
-        # Check for existing bookings
-        bookings = db.bookings.find_one({"tierId": tier_id})
-        if bookings:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Cannot delete tier with existing bookings"
-            )
-
-        # Delete associated services
-        db.services.delete_many({"tier_id": tier_id})
-
-        result = db.service_tiers.delete_one({"_id": ObjectId(tier_id)})
-
-        if result.deleted_count == 0:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Service tier deletion failed"
-            )
-
-        return {"message": "Service tier and associated services deleted successfully"}
-    except Exception as e:
-        logger.error(f"Error deleting service tier: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Service tier deletion failed"
-        )
 
 
 @app.post("/service-tiers/image")
@@ -1887,170 +1783,6 @@ async def create_service(
     )
 
 
-@app.put("/services/{service_id}", response_model=Service)
-async def update_service(
-        service_id: str,
-        service_update: ServiceUpdate,
-        current_user: UserInDB = Depends(get_admin_user)
-):
-    try:
-        service = db.services.find_one({"_id": ObjectId(service_id)})
-        if not service:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Service not found"
-            )
-
-        update_data = service_update.dict(exclude_unset=True)
-
-        # Validate category if being updated
-        if "category_id" in update_data and update_data["category_id"]:
-            category = db.service_categories.find_one({"_id": ObjectId(update_data["category_id"])})
-            if not category:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Service category not found"
-                )
-
-        # Validate tier if being updated
-        if "tier_id" in update_data and update_data["tier_id"]:
-            tier = db.service_tiers.find_one({"_id": ObjectId(update_data["tier_id"])})
-            if not tier:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Service tier not found"
-                )
-
-        if update_data:
-            if "name" in update_data and not update_data["name"].strip():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Name cannot be empty"
-                )
-            if "description" in update_data and not update_data["description"].strip():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Description cannot be empty"
-                )
-            if "duration" in update_data and not update_data["duration"].strip():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Duration cannot be empty"
-                )
-
-            update_data["updatedAt"] = datetime.utcnow()
-            result = db.services.update_one(
-                {"_id": ObjectId(service_id)},
-                {"$set": update_data}
-            )
-
-            if result.modified_count == 0:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Service update failed"
-                )
-
-        updated_service = db.services.find_one({"_id": ObjectId(service_id)})
-
-        # Get category and tier info
-        category_obj = None
-        tier_obj = None
-
-        if updated_service.get("category_id"):
-            category = db.service_categories.find_one({"_id": ObjectId(updated_service["category_id"])})
-            if category:
-                category_obj = ServiceCategory(
-                    id=str(category["_id"]),
-                    name=category["name"],
-                    description=category["description"],
-                    category_type=category["category_type"],
-                    image=category.get("image"),
-                    is_active=category["is_active"],
-                    created_at=category["created_at"],
-                    updated_at=category["updated_at"],
-                    tiers=[],
-                    services=[]
-                )
-
-        if updated_service.get("tier_id"):
-            tier = db.service_tiers.find_one({"_id": ObjectId(updated_service["tier_id"])})
-            if tier:
-                tier_obj = ServiceTier(
-                    id=str(tier["_id"]),
-                    name=tier["name"],
-                    description=tier["description"],
-                    price=tier["price"],
-                    category_id=tier["category_id"],
-                    image=tier.get("image"),
-                    features=tier.get("features", []),
-                    is_popular=tier.get("is_popular", False),
-                    is_available=tier.get("is_available", True),
-                    created_at=tier["created_at"],
-                    updated_at=tier["updated_at"],
-                    services=[]
-                )
-
-        return Service(
-            id=str(updated_service["_id"]),
-            name=updated_service["name"],
-            description=updated_service["description"],
-            image=updated_service.get("image"),
-            duration=updated_service["duration"],
-            isAvailable=updated_service["isAvailable"],
-            features=updated_service.get("features", []),
-            requirements=updated_service.get("requirements", []),
-            category_id=updated_service.get("category_id"),
-            tier_id=updated_service.get("tier_id"),
-            createdAt=updated_service["createdAt"],
-            updatedAt=updated_service["updatedAt"],
-            category=category_obj,
-            tier=tier_obj
-        )
-    except Exception as e:
-        logger.error(f"Error updating service: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Service update failed"
-        )
-
-
-@app.delete("/services/{service_id}")
-async def delete_service(
-        service_id: str,
-        current_user: UserInDB = Depends(get_admin_user)
-):
-    try:
-        service = db.services.find_one({"_id": ObjectId(service_id)})
-        if not service:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Service not found"
-            )
-
-        bookings = db.bookings.find_one({"serviceId": service_id})
-        if bookings:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Cannot delete service with existing bookings"
-            )
-
-        result = db.services.delete_one({"_id": ObjectId(service_id)})
-
-        if result.deleted_count == 0:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Service deletion failed"
-            )
-
-        return {"message": "Service deleted successfully"}
-    except Exception as e:
-        logger.error(f"Error deleting service: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Service deletion failed"
-        )
-
-
 @app.post("/services/image")
 async def upload_service_image(
         file: UploadFile = File(...),
@@ -2066,13 +1798,13 @@ async def upload_service_image(
     return {"imageUrl": image_url}
 
 
-# Booking routes with proper tier/service handling
+# Enhanced Booking routes with Flutterwave payment integration
 @app.post("/bookings", response_model=Booking)
 async def create_booking(
         booking: BookingCreate,
         current_user: UserInDB = Depends(get_current_active_user)
 ):
-    """Create a new booking for either a service or tier"""
+    """Create a new booking for either a service or tier with payment integration"""
     if current_user.role != "admin" and booking.userId != str(current_user.id):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -2129,6 +1861,7 @@ async def create_booking(
             booking.booking_type = BookingType.CONSULTATION
             booking.payment_required = False
             booking.payment_amount = 0.0
+            booking.payment_status = PaymentStatus.PENDING
 
             service_obj = Service(
                 id=str(service["_id"]),
@@ -2198,6 +1931,7 @@ async def create_booking(
             booking.booking_type = BookingType.TIER_BOOKING
             booking.payment_required = True
             booking.payment_amount = tier["price"]
+            booking.payment_status = PaymentStatus.PENDING
 
             # Get services in this tier
             tier_services = list(db.services.find({"tier_id": booking.tierId}))
@@ -2256,11 +1990,37 @@ async def create_booking(
                 detail="Invalid tier ID"
             )
 
+    # Create booking in database
     booking_in_db = BookingInDB(**booking.dict())
     result = db.bookings.insert_one(booking_in_db.dict(by_alias=True))
-
     created_booking = db.bookings.find_one({"_id": result.inserted_id})
 
+    # Generate payment URL for tier bookings
+    payment_url = None
+    if booking.booking_type == BookingType.TIER_BOOKING and booking.payment_required:
+        try:
+            user = get_user_by_id(booking.userId)
+            if user:
+                payment_url = generate_flutterwave_payment_url(
+                    {"id": str(created_booking["_id"])},
+                    user.__dict__,
+                    booking.payment_amount
+                )
+
+                # Update booking with payment URL
+                db.bookings.update_one(
+                    {"_id": result.inserted_id},
+                    {"$set": {"payment_url": payment_url}}
+                )
+
+                # Update the created_booking dict for response
+                created_booking["payment_url"] = payment_url
+
+        except Exception as e:
+            logger.error(f"Payment URL generation failed: {e}")
+            # Continue without payment URL - can be generated later
+
+    # Send emails and notifications
     user = get_user_by_id(booking.userId)
     if user:
         if booking.booking_type == BookingType.CONSULTATION:
@@ -2286,6 +2046,7 @@ async def create_booking(
             send_email(user.email, "Service Request - Naija Concierge", booking_html)
         elif booking.booking_type == BookingType.TIER_BOOKING:
             service_list = ", ".join([s.name for s in tier_obj.services])
+            payment_info = f"<p>Payment URL: <a href='{payment_url}'>Complete Payment</a></p>" if payment_url else "<p>Payment URL will be provided shortly.</p>"
             booking_html = f"""
             <html>
                 <body>
@@ -2293,6 +2054,7 @@ async def create_booking(
                     <p>Dear {user.firstName},</p>
                     <p>Your booking for {tier_obj.name} from {category_obj.name} has been received.</p>
                     <p>To confirm your booking, please complete the payment of ₦{tier_obj.price}.</p>
+                    {payment_info}
                     <p>Booking Details:</p>
                     <ul>
                         <li>Tier: {tier_obj.name}</li>
@@ -2329,6 +2091,7 @@ async def create_booking(
         - Date: {created_booking["bookingDate"].strftime("%Y-%m-%d %H:%M")}
         - Amount: ₦{tier_obj.price}
         - Payment Required: Yes
+        - Payment URL: {payment_url or "Generation failed"}
         """
 
     send_admin_notification("New Booking Created", notification_message)
@@ -2345,6 +2108,10 @@ async def create_booking(
         contact_preference=created_booking.get("contact_preference"),
         payment_required=created_booking["payment_required"],
         payment_amount=created_booking.get("payment_amount"),
+        payment_url=created_booking.get("payment_url"),
+        payment_status=created_booking.get("payment_status", PaymentStatus.PENDING),
+        payment_reference=created_booking.get("payment_reference"),
+        flutterwave_tx_ref=created_booking.get("flutterwave_tx_ref"),
         createdAt=created_booking["createdAt"],
         updatedAt=created_booking["updatedAt"],
         service=service_obj,
@@ -2447,6 +2214,10 @@ async def get_bookings(
                     contact_preference=booking.get("contact_preference"),
                     payment_required=booking.get("payment_required", False),
                     payment_amount=booking.get("payment_amount"),
+                    payment_url=booking.get("payment_url"),
+                    payment_status=booking.get("payment_status", PaymentStatus.PENDING),
+                    payment_reference=booking.get("payment_reference"),
+                    flutterwave_tx_ref=booking.get("flutterwave_tx_ref"),
                     createdAt=booking["createdAt"],
                     updatedAt=booking["updatedAt"],
                     service=service_obj,
@@ -2459,7 +2230,7 @@ async def get_bookings(
     return result
 
 
-# Enhanced Airtable booking with tier support
+# Enhanced Airtable booking with tier support and payment integration
 @app.post("/bookings/airtable", response_model=Booking)
 async def create_airtable_booking(
         booking_form: AirtableBookingForm,
@@ -2577,10 +2348,36 @@ async def create_airtable_booking(
             specialRequests=booking_form.specialRequests,
             booking_type=booking_type,
             payment_required=payment_required,
-            payment_amount=payment_amount
+            payment_amount=payment_amount,
+            payment_status=PaymentStatus.PENDING
         )
         result = db.bookings.insert_one(booking_data.dict(by_alias=True))
         created_booking = db.bookings.find_one({"_id": result.inserted_id})
+
+        # Generate payment URL for tier bookings
+        payment_url = None
+        if booking_type == BookingType.TIER_BOOKING and payment_required:
+            try:
+                user_obj = get_user_by_id(user_id)
+                if user_obj:
+                    payment_url = generate_flutterwave_payment_url(
+                        {"id": str(created_booking["_id"])},
+                        user_obj.__dict__,
+                        payment_amount
+                    )
+
+                    # Update booking with payment URL
+                    db.bookings.update_one(
+                        {"_id": result.inserted_id},
+                        {"$set": {"payment_url": payment_url}}
+                    )
+
+                    # Update the created_booking dict for response
+                    created_booking["payment_url"] = payment_url
+
+            except Exception as e:
+                logger.error(f"Payment URL generation failed for Airtable booking: {e}")
+                # Continue without payment URL
 
         airtable_data = {
             "Booking ID": str(created_booking["_id"]),
@@ -2592,6 +2389,7 @@ async def create_airtable_booking(
             "Total Cost": float(payment_amount),
             "Booking Type": booking_type,
             "Payment Required": payment_required,
+            "Payment URL": payment_url or "",
             "Feedback": [],
             "Subscription Plan": [],
             "User": []
@@ -2647,6 +2445,7 @@ async def create_airtable_booking(
             - Type: Contact Required
             """
         else:  # TIER_BOOKING
+            payment_info = f"<p>Payment URL: <a href='{payment_url}'>Complete Payment</a></p>" if payment_url else "<p>Payment URL will be provided shortly.</p>"
             confirmation_html = f"""
             <html>
                 <body>
@@ -2654,6 +2453,7 @@ async def create_airtable_booking(
                     <p>Dear {booking_form.clientName},</p>
                     <p>Your booking for {service_name} from {category_name} has been received.</p>
                     <p>To confirm your booking, please complete the payment of ₦{payment_amount}.</p>
+                    {payment_info}
                     <p>Booking Details:</p>
                     <ul>
                         <li>Tier: {service_name}</li>
@@ -2675,6 +2475,7 @@ async def create_airtable_booking(
             - Email: {booking_email}
             - Amount: ₦{payment_amount}
             - Payment Required: Yes
+            - Payment URL: {payment_url or "Generation failed"}
             """
 
         send_email(booking_email, "Booking Confirmation - Naija Concierge", confirmation_html)
@@ -2732,6 +2533,10 @@ async def create_airtable_booking(
             contact_preference=created_booking.get("contact_preference"),
             payment_required=created_booking["payment_required"],
             payment_amount=created_booking.get("payment_amount"),
+            payment_url=created_booking.get("payment_url"),
+            payment_status=created_booking.get("payment_status", PaymentStatus.PENDING),
+            payment_reference=created_booking.get("payment_reference"),
+            flutterwave_tx_ref=created_booking.get("flutterwave_tx_ref"),
             createdAt=created_booking["createdAt"],
             updatedAt=created_booking["updatedAt"],
             service=service_obj,
@@ -2743,6 +2548,206 @@ async def create_airtable_booking(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to create booking: {str(e)}"
         )
+
+
+# Payment webhook endpoint
+@app.post("/webhooks/flutterwave")
+async def flutterwave_webhook(request: Request):
+    """Handle Flutterwave payment webhooks"""
+    try:
+        # Get raw body for signature verification
+        body = await request.body()
+        signature = request.headers.get("verif-hash")
+
+        if not verify_webhook_signature(body.decode(), signature):
+            logger.warning("Invalid webhook signature")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid signature"
+            )
+
+        # Parse webhook data
+        webhook_data = json.loads(body.decode())
+        event = webhook_data.get("event")
+        data = webhook_data.get("data", {})
+
+        if event == "charge.completed":
+            tx_ref = data.get("tx_ref")
+            flw_ref = data.get("flw_ref")
+            payment_status = data.get("status")
+            amount = data.get("amount")
+
+            if not tx_ref:
+                logger.error("No transaction reference in webhook")
+                return {"status": "error", "message": "No transaction reference"}
+
+            # Find booking by transaction reference
+            booking = db.bookings.find_one({"flutterwave_tx_ref": tx_ref})
+            if not booking:
+                logger.error(f"No booking found for tx_ref: {tx_ref}")
+                return {"status": "error", "message": "Booking not found"}
+
+            # Verify payment with Flutterwave
+            try:
+                verification_response = verify_flutterwave_payment(tx_ref)
+                verified_data = verification_response.get("data", {})
+                verified_status = verified_data.get("status")
+                verified_amount = verified_data.get("amount")
+
+                if verified_status == "successful" and verified_amount == booking.get("payment_amount"):
+                    # Update booking status
+                    update_data = {
+                        "payment_status": PaymentStatus.SUCCESSFUL,
+                        "payment_reference": flw_ref,
+                        "status": "confirmed",
+                        "updatedAt": datetime.utcnow()
+                    }
+
+                    db.bookings.update_one(
+                        {"_id": ObjectId(booking["_id"])},
+                        {"$set": update_data}
+                    )
+
+                    # Send confirmation email
+                    user = get_user_by_id(booking["userId"])
+                    if user:
+                        # Get tier/service details
+                        tier_name = "Unknown"
+                        if booking.get("tierId"):
+                            tier = db.service_tiers.find_one({"_id": ObjectId(booking["tierId"])})
+                            if tier:
+                                tier_name = tier["name"]
+
+                        confirmation_html = f"""
+                        <html>
+                            <body>
+                                <h1>Payment Successful - Booking Confirmed</h1>
+                                <p>Dear {user.firstName},</p>
+                                <p>Your payment has been successfully processed and your booking is now confirmed.</p>
+                                <p>Payment Details:</p>
+                                <ul>
+                                    <li>Tier: {tier_name}</li>
+                                    <li>Amount: ₦{verified_amount}</li>
+                                    <li>Reference: {flw_ref}</li>
+                                    <li>Status: Confirmed</li>
+                                </ul>
+                                <p>Our team will contact you shortly to coordinate the service delivery.</p>
+                                <p>Best regards,<br>The Naija Concierge Team</p>
+                            </body>
+                        </html>
+                        """
+                        send_email(user.email, "Payment Successful - Booking Confirmed", confirmation_html)
+
+                    # Send admin notification
+                    admin_notification = f"""
+                    Payment received for booking:
+                    - Booking ID: {booking["_id"]}
+                    - Client: {user.firstName} {user.lastName} if user else "Unknown"
+                    - Tier: {tier_name}
+                    - Amount: ₦{verified_amount}
+                    - Reference: {flw_ref}
+                    - Status: Confirmed
+                    """
+                    send_admin_notification("Payment Received", admin_notification)
+
+                    logger.info(f"Payment successful for booking {booking['_id']}")
+
+                elif verified_status == "failed":
+                    # Update booking as failed
+                    db.bookings.update_one(
+                        {"_id": ObjectId(booking["_id"])},
+                        {"$set": {
+                            "payment_status": PaymentStatus.FAILED,
+                            "payment_reference": flw_ref,
+                            "updatedAt": datetime.utcnow()
+                        }}
+                    )
+
+                    logger.info(f"Payment failed for booking {booking['_id']}")
+
+                else:
+                    logger.warning(f"Unhandled payment status: {verified_status}")
+
+            except Exception as e:
+                logger.error(f"Error verifying payment: {e}")
+                return {"status": "error", "message": "Payment verification failed"}
+
+        return {"status": "success"}
+
+    except Exception as e:
+        logger.error(f"Error processing webhook: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Webhook processing failed"
+        )
+
+
+# Payment verification endpoint
+@app.get("/payments/verify/{tx_ref}")
+async def verify_payment(
+        tx_ref: str,
+        current_user: UserInDB = Depends(get_current_active_user)
+):
+    """Manually verify payment status"""
+    try:
+        # Find booking by transaction reference
+        booking = db.bookings.find_one({"flutterwave_tx_ref": tx_ref})
+        if not booking:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Booking not found"
+            )
+
+        # Check if user has permission to verify this payment
+        if current_user.role != "admin" and booking["userId"] != str(current_user.id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not enough permissions"
+            )
+
+        # Verify with Flutterwave
+        verification_response = verify_flutterwave_payment(tx_ref)
+        verified_data = verification_response.get("data", {})
+        verified_status = verified_data.get("status")
+        verified_amount = verified_data.get("amount")
+
+        return {
+            "tx_ref": tx_ref,
+            "status": verified_status,
+            "amount": verified_amount,
+            "booking_id": str(booking["_id"]),
+            "verification_data": verified_data
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error verifying payment: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Payment verification failed"
+        )
+
+
+# Payment success/failure redirect pages
+@app.get("/booking/payment-success")
+async def payment_success(tx_ref: Optional[str] = None):
+    """Payment success redirect page"""
+    return {
+        "message": "Payment successful! Your booking has been confirmed.",
+        "tx_ref": tx_ref,
+        "status": "success"
+    }
+
+
+@app.get("/booking/payment-failed")
+async def payment_failed(tx_ref: Optional[str] = None):
+    """Payment failure redirect page"""
+    return {
+        "message": "Payment failed. Please try again or contact support.",
+        "tx_ref": tx_ref,
+        "status": "failed"
+    }
 
 
 # Contact routes
@@ -2788,15 +2793,6 @@ async def send_contact_message(message: ContactMessage):
         </html>
         """
         send_email(message.email, "Thank You for Contacting Naija Concierge", confirmation_html)
-
-        notification_message = f"""
-        New contact message received:
-        - Name: {message.name}
-        - Email: {message.email}
-        - Subject: {message.subject}
-        - Message: {message.message[:100]}...
-        """
-        send_admin_notification("New Contact Message", notification_message)
 
         return {"message": "Contact message sent successfully"}
     except Exception as e:
