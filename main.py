@@ -2330,7 +2330,7 @@ async def upload_service_tier_image(
 async def convert_tier_price(
     tier_id: str,
     currency: str,
-    current_user: UserInDB = Depends(get_current_active_user)
+    # current_user: UserInDB = Depends(get_current_active_user)
 ):
     """Convert tier price to the specified currency"""
     allowed_currencies = ["NGN", "USD", "EUR", "GBP"]
@@ -2354,7 +2354,7 @@ async def convert_tier_price(
             detail="Invalid tier ID"
         )
 
-    base_currency = "NGN"  # Assuming tier prices are stored in NGN
+    base_currency = "NGN"
     amount = tier["price"]
 
     if currency != base_currency:
