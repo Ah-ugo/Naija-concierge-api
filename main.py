@@ -1341,6 +1341,183 @@ async def get_me(current_user: UserInDB = Depends(get_current_active_user)):
     )
 
 
+@app.get("/users", response_model=List[User])
+async def get_users(
+        skip: int = 0,
+        limit: int = 100,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    users = list(db.users.find().skip(skip).limit(limit))
+    return [
+        User(
+            id=str(user["_id"]),
+            email=user["email"],
+            firstName=user["firstName"],
+            lastName=user["lastName"],
+            phone=user.get("phone"),
+            address=user.get("address"),
+            profileImage=user.get("profileImage"),
+            role=user["role"],
+            createdAt=user["createdAt"],
+            updatedAt=user["updatedAt"]
+        ) for user in users
+    ]
+
+
+@app.get("/users/{user_id}", response_model=User)
+async def get_user_details(
+        user_id: str,
+        current_user: UserInDB = Depends(get_current_active_user)
+):
+    # Only admins can view other users' details
+    if str(current_user.id) != user_id and current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not enough permissions",
+        )
+
+    user = get_user_by_id(user_id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    return User(
+        id=str(user.id),
+        email=user.email,
+        firstName=user.firstName,
+        lastName=user.lastName,
+        phone=user.phone,
+        address=user.address,
+        profileImage=user.profileImage,
+        role=user.role,
+        createdAt=user.createdAt,
+        updatedAt=user.updatedAt
+    )
+
+
+@app.put("/users/{user_id}", response_model=User)
+async def update_user(
+        user_id: str,
+        user_update: UserUpdate,
+        current_user: UserInDB = Depends(get_current_active_user)
+):
+    # Only the user themselves or an admin can update a user
+    if str(current_user.id) != user_id and current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not enough permissions",
+        )
+
+    # Check if user exists
+    user = get_user_by_id(user_id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    # Update user
+    update_data = user_update.dict(exclude_unset=True)
+    if update_data:
+        update_data["updatedAt"] = datetime.utcnow()
+        result = db.users.update_one(
+            {"_id": ObjectId(user_id)},
+            {"$set": update_data}
+        )
+
+        if result.modified_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="User update failed",
+            )
+
+    # Get updated user
+    updated_user = get_user_by_id(user_id)
+
+    return User(
+        id=str(updated_user.id),
+        email=updated_user.email,
+        firstName=updated_user.firstName,
+        lastName=updated_user.lastName,
+        phone=updated_user.phone,
+        address=updated_user.address,
+        profileImage=updated_user.profileImage,
+        role=updated_user.role,
+        createdAt=updated_user.createdAt,
+        updatedAt=updated_user.updatedAt
+    )
+
+@app.delete("/users/{user_id}")
+async def delete_user(
+        user_id: str,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    try:
+        user = db.users.find_one({"_id": ObjectId(user_id)})
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found",
+            )
+
+        bookings = db.bookings.find_one({"userId": user_id})
+        if bookings:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot delete user with existing bookings",
+            )
+
+        subscriptions = db.subscriptions.find_one({"userId": user_id})
+        if subscriptions:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot delete user with existing subscriptions",
+            )
+
+        result = db.users.delete_one({"_id": ObjectId(user_id)})
+        if result.deleted_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="User deletion failed",
+            )
+
+        return {"message": "User deleted successfully"}
+    except Exception as e:
+        logger.error(f"Error deleting user: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User deletion failed",
+        )
+
+
+@app.post("/users/profile-image")
+async def upload_profile_image(
+        file: UploadFile = File(...),
+        current_user: UserInDB = Depends(get_current_user)
+):
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File must be an image"
+        )
+
+    image_url = upload_file_to_cloudinary(file, folder="naija_concierge/profiles")
+
+    result = db.users.update_one(
+        {"_id": ObjectId(current_user.id)},
+        {"$set": {"profileImage": image_url, "updatedAt": datetime.utcnow()}}
+    )
+
+    if result.modified_count == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to update profile image",
+        )
+
+    return {"profileImage": image_url}
+
 @app.get("/gallery", response_model=List[GalleryImage])
 async def get_gallery(
         skip: int = 0,
