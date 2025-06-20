@@ -1831,7 +1831,7 @@ async def create_booking(
     if booking.serviceId:
         # Individual service booking (contact-only)
         try:
-            service = db.services.find_one({"_id": ObjectId(booking.serviceId)})
+            service = db.service_categories.find_one({"_id": ObjectId(booking.serviceId)})
             if not service:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
@@ -1845,7 +1845,7 @@ async def create_booking(
                 )
 
             # Get category to determine booking type
-            category = db.service_categories.find_one({"_id": ObjectId(service["category_id"])})
+            category = db.service_categories.find_one({"_id": ObjectId(booking.serviceId)})
             if not category:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
