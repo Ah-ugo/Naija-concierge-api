@@ -2263,6 +2263,194 @@ async def create_service_category(
     )
 
 
+@app.put("/service-categories/{category_id}", response_model=ServiceCategory)
+async def update_service_category(
+        category_id: str,
+        category_update: ServiceCategoryUpdate,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    """Update a service category"""
+    try:
+        category = db.service_categories.find_one({"_id": ObjectId(category_id)})
+        if not category:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Service category not found"
+            )
+
+        update_data = category_update.dict(exclude_unset=True)
+        if update_data:
+            # Validate required fields if provided
+            if "name" in update_data and not update_data["name"].strip():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Category name cannot be empty"
+                )
+
+            if "description" in update_data and not update_data["description"].strip():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Category description cannot be empty"
+                )
+
+            update_data["updated_at"] = datetime.utcnow()
+            result = db.service_categories.update_one(
+                {"_id": ObjectId(category_id)},
+                {"$set": update_data}
+            )
+
+            if result.modified_count == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Category update failed"
+                )
+
+        updated_category = db.service_categories.find_one({"_id": ObjectId(category_id)})
+
+        # Get tiers and services for response
+        tiers = []
+        services = []
+
+        if updated_category["category_type"] == ServiceCategoryType.TIERED:
+            tier_docs = list(db.service_tiers.find({"category_id": category_id}))
+            for tier_doc in tier_docs:
+                tier_services = list(db.services.find({"tier_id": str(tier_doc["_id"])}))
+                tier_service_objects = []
+
+                for service in tier_services:
+                    tier_service_objects.append(
+                        Service(
+                            id=str(service["_id"]),
+                            name=service["name"],
+                            description=service["description"],
+                            image=service.get("image"),
+                            duration=service["duration"],
+                            isAvailable=service["isAvailable"],
+                            features=service.get("features", []),
+                            requirements=service.get("requirements", []),
+                            category_id=service.get("category_id"),
+                            tier_id=service.get("tier_id"),
+                            createdAt=service["createdAt"],
+                            updatedAt=service["updatedAt"]
+                        )
+                    )
+
+                tiers.append(
+                    ServiceTier(
+                        id=str(tier_doc["_id"]),
+                        name=tier_doc["name"],
+                        description=tier_doc["description"],
+                        price=tier_doc["price"],
+                        category_id=tier_doc["category_id"],
+                        image=tier_doc.get("image"),
+                        features=tier_doc.get("features", []),
+                        is_popular=tier_doc.get("is_popular", False),
+                        is_available=tier_doc.get("is_available", True),
+                        created_at=tier_doc["created_at"],
+                        updated_at=tier_doc["updated_at"],
+                        services=tier_service_objects
+                    )
+                )
+        else:
+            service_docs = list(db.services.find({"category_id": category_id, "tier_id": None}))
+            for service in service_docs:
+                services.append(
+                    Service(
+                        id=str(service["_id"]),
+                        name=service["name"],
+                        description=service["description"],
+                        image=service.get("image"),
+                        duration=service["duration"],
+                        isAvailable=service["isAvailable"],
+                        features=service.get("features", []),
+                        requirements=service.get("requirements", []),
+                        category_id=service.get("category_id"),
+                        tier_id=service.get("tier_id"),
+                        createdAt=service["createdAt"],
+                        updatedAt=service["updatedAt"]
+                    )
+                )
+
+        return ServiceCategory(
+            id=str(updated_category["_id"]),
+            name=updated_category["name"],
+            description=updated_category["description"],
+            category_type=updated_category["category_type"],
+            image=updated_category.get("image"),
+            is_active=updated_category["is_active"],
+            created_at=updated_category["created_at"],
+            updated_at=updated_category["updated_at"],
+            tiers=tiers,
+            services=services
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating service category: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update service category"
+        )
+
+
+@app.delete("/service-categories/{category_id}")
+async def delete_service_category(
+        category_id: str,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    """Delete a service category"""
+    try:
+        category = db.service_categories.find_one({"_id": ObjectId(category_id)})
+        if not category:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Service category not found"
+            )
+
+        # Check for dependencies
+        tiers_count = db.service_tiers.count_documents({"category_id": category_id})
+        services_count = db.services.count_documents({"category_id": category_id})
+        bookings_count = db.bookings.count_documents({"serviceId": category_id})
+
+        if tiers_count > 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot delete category with {tiers_count} associated tiers. Delete tiers first."
+            )
+
+        if services_count > 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot delete category with {services_count} associated services. Delete services first."
+            )
+
+        if bookings_count > 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot delete category with {bookings_count} associated bookings."
+            )
+
+        result = db.service_categories.delete_one({"_id": ObjectId(category_id)})
+
+        if result.deleted_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Category deletion failed"
+            )
+
+        return {"message": "Service category deleted successfully"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting service category: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete service category"
+        )
+
+
 @app.post("/service-categories/image")
 async def upload_service_category_image(
         file: UploadFile = File(...),
@@ -2484,6 +2672,661 @@ async def create_service_tier(
         updated_at=created_tier["updated_at"],
         services=[]
     )
+
+
+@app.put("/service-tiers/{tier_id}", response_model=ServiceTier)
+async def update_service_tier(
+        tier_id: str,
+        tier_update: ServiceTierUpdate,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    """Update a service tier"""
+    try:
+        tier = db.service_tiers.find_one({"_id": ObjectId(tier_id)})
+        if not tier:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Service tier not found"
+            )
+
+        update_data = tier_update.dict(exclude_unset=True)
+        if update_data:
+            # Validate required fields if provided
+            if "name" in update_data and not update_data["name"].strip():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Tier name cannot be empty"
+                )
+
+            if "description" in update_data and not update_data["description"].strip():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Tier description cannot be empty"
+                )
+
+            if "price" in update_data and update_data["price"] < 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Price cannot be negative"
+                )
+
+            # Validate category if being updated
+            if "category_id" in update_data:
+                category = db.service_categories.find_one({"_id": ObjectId(update_data["category_id"])})
+                if not category:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Service category not found"
+                    )
+                if category["category_type"] != ServiceCategoryType.TIERED:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Can only assign tiers to tiered categories"
+                    )
+
+            update_data["updated_at"] = datetime.utcnow()
+            result = db.service_tiers.update_one(
+                {"_id": ObjectId(tier_id)},
+                {"$set": update_data}
+            )
+
+            if result.modified_count == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Tier update failed"
+                )
+
+        updated_tier = db.service_tiers.find_one({"_id": ObjectId(tier_id)})
+
+        # Get services for this tier
+        services = list(db.services.find({"tier_id": tier_id}))
+        service_objects = []
+
+        for service in services:
+            service_objects.append(
+                Service(
+                    id=str(service["_id"]),
+                    name=service["name"],
+                    description=service["description"],
+                    image=service.get("image"),
+                    duration=service["duration"],
+                    isAvailable=service["isAvailable"],
+                    features=service.get("features", []),
+                    requirements=service.get("requirements", []),
+                    category_id=service.get("category_id"),
+                    tier_id=service.get("tier_id"),
+                    createdAt=service["createdAt"],
+                    updatedAt=service["updatedAt"]
+                )
+            )
+
+        # Get category info
+        category_obj = None
+        if updated_tier.get("category_id"):
+            category = db.service_categories.find_one({"_id": ObjectId(updated_tier["category_id"])})
+            if category:
+                category_obj = ServiceCategory(
+                    id=str(category["_id"]),
+                    name=category["name"],
+                    description=category["description"],
+                    category_type=category["category_type"],
+                    image=category.get("image"),
+                    is_active=category["is_active"],
+                    created_at=category["created_at"],
+                    updated_at=category["updated_at"],
+                    tiers=[],
+                    services=[]
+                )
+
+        return ServiceTier(
+            id=str(updated_tier["_id"]),
+            name=updated_tier["name"],
+            description=updated_tier["description"],
+            price=updated_tier["price"],
+            category_id=updated_tier["category_id"],
+            image=updated_tier.get("image"),
+            features=updated_tier.get("features", []),
+            is_popular=updated_tier.get("is_popular", False),
+            is_available=updated_tier.get("is_available", True),
+            created_at=updated_tier["created_at"],
+            updated_at=updated_tier["updated_at"],
+            services=service_objects,
+            category=category_obj
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating service tier: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update service tier"
+        )
+
+
+@app.delete("/service-tiers/{tier_id}")
+async def delete_service_tier(
+        tier_id: str,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    """Delete a service tier"""
+    try:
+        tier = db.service_tiers.find_one({"_id": ObjectId(tier_id)})
+        if not tier:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Service tier not found"
+            )
+
+        # Check for dependencies
+        services_count = db.services.count_documents({"tier_id": tier_id})
+        bookings_count = db.bookings.count_documents({"tierId": tier_id})
+
+        if services_count > 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot delete tier with {services_count} associated services. Delete services first."
+            )
+
+        if bookings_count > 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot delete tier with {bookings_count} associated bookings."
+            )
+
+        result = db.service_tiers.delete_one({"_id": ObjectId(tier_id)})
+
+        if result.deleted_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Tier deletion failed"
+            )
+
+        return {"message": "Service tier deleted successfully"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting service tier: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete service tier"
+        )
+
+
+@app.put("/services/{service_id}", response_model=Service)
+async def update_service(
+        service_id: str,
+        service_update: ServiceUpdate,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    """Update a service"""
+    try:
+        service = db.services.find_one({"_id": ObjectId(service_id)})
+        if not service:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Service not found"
+            )
+
+        update_data = service_update.dict(exclude_unset=True)
+        if update_data:
+            # Validate required fields if provided
+            if "name" in update_data and not update_data["name"].strip():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Service name cannot be empty"
+                )
+
+            if "description" in update_data and not update_data["description"].strip():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Service description cannot be empty"
+                )
+
+            if "duration" in update_data and not update_data["duration"].strip():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Service duration cannot be empty"
+                )
+
+            # Validate category if being updated
+            if "category_id" in update_data and update_data["category_id"]:
+                category = db.service_categories.find_one({"_id": ObjectId(update_data["category_id"])})
+                if not category:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Service category not found"
+                    )
+
+            # Validate tier if being updated
+            if "tier_id" in update_data and update_data["tier_id"]:
+                tier = db.service_tiers.find_one({"_id": ObjectId(update_data["tier_id"])})
+                if not tier:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Service tier not found"
+                    )
+
+                # Ensure tier belongs to the specified category
+                if update_data.get("category_id") and tier["category_id"] != update_data["category_id"]:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Tier does not belong to the specified category"
+                    )
+
+            update_data["updatedAt"] = datetime.utcnow()
+            result = db.services.update_one(
+                {"_id": ObjectId(service_id)},
+                {"$set": update_data}
+            )
+
+            if result.modified_count == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Service update failed"
+                )
+
+        updated_service = db.services.find_one({"_id": ObjectId(service_id)})
+
+        # Get category and tier info
+        category_obj = None
+        tier_obj = None
+
+        if updated_service.get("category_id"):
+            category = db.service_categories.find_one({"_id": ObjectId(updated_service["category_id"])})
+            if category:
+                category_obj = ServiceCategory(
+                    id=str(category["_id"]),
+                    name=category["name"],
+                    description=category["description"],
+                    category_type=category["category_type"],
+                    image=category.get("image"),
+                    is_active=category["is_active"],
+                    created_at=category["created_at"],
+                    updated_at=category["updated_at"],
+                    tiers=[],
+                    services=[]
+                )
+
+        if updated_service.get("tier_id"):
+            tier = db.service_tiers.find_one({"_id": ObjectId(updated_service["tier_id"])})
+            if tier:
+                tier_obj = ServiceTier(
+                    id=str(tier["_id"]),
+                    name=tier["name"],
+                    description=tier["description"],
+                    price=tier["price"],
+                    category_id=tier["category_id"],
+                    image=tier.get("image"),
+                    features=tier.get("features", []),
+                    is_popular=tier.get("is_popular", False),
+                    is_available=tier.get("is_available", True),
+                    created_at=tier["created_at"],
+                    updated_at=tier["updated_at"],
+                    services=[]
+                )
+
+        return Service(
+            id=str(updated_service["_id"]),
+            name=updated_service["name"],
+            description=updated_service["description"],
+            image=updated_service.get("image"),
+            duration=updated_service["duration"],
+            isAvailable=updated_service["isAvailable"],
+            features=updated_service.get("features", []),
+            requirements=updated_service.get("requirements", []),
+            category_id=updated_service.get("category_id"),
+            tier_id=updated_service.get("tier_id"),
+            createdAt=updated_service["createdAt"],
+            updatedAt=updated_service["updatedAt"],
+            category=category_obj,
+            tier=tier_obj
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating service: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update service"
+        )
+
+
+@app.delete("/services/{service_id}")
+async def delete_service(
+        service_id: str,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    """Delete a service"""
+    try:
+        service = db.services.find_one({"_id": ObjectId(service_id)})
+        if not service:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Service not found"
+            )
+
+        # Check for dependencies
+        bookings_count = db.bookings.count_documents({"serviceId": service_id})
+
+        if bookings_count > 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot delete service with {bookings_count} associated bookings."
+            )
+
+        result = db.services.delete_one({"_id": ObjectId(service_id)})
+
+        if result.deleted_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Service deletion failed"
+            )
+
+        return {"message": "Service deleted successfully"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting service: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete service"
+        )
+
+
+# Bulk operations (bonus endpoints)
+@app.post("/service-categories/{category_id}/toggle-status")
+async def toggle_category_status(
+        category_id: str,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    """Toggle active/inactive status of a service category"""
+    try:
+        category = db.service_categories.find_one({"_id": ObjectId(category_id)})
+        if not category:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Service category not found"
+            )
+
+        new_status = not category["is_active"]
+        result = db.service_categories.update_one(
+            {"_id": ObjectId(category_id)},
+            {"$set": {"is_active": new_status, "updated_at": datetime.utcnow()}}
+        )
+
+        if result.modified_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Status update failed"
+            )
+
+        return {
+            "message": f"Category {'activated' if new_status else 'deactivated'} successfully",
+            "is_active": new_status
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error toggling category status: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to toggle category status"
+        )
+
+
+@app.post("/service-tiers/{tier_id}/toggle-availability")
+async def toggle_tier_availability(
+        tier_id: str,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    """Toggle available/unavailable status of a service tier"""
+    try:
+        tier = db.service_tiers.find_one({"_id": ObjectId(tier_id)})
+        if not tier:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Service tier not found"
+            )
+
+        new_status = not tier["is_available"]
+        result = db.service_tiers.update_one(
+            {"_id": ObjectId(tier_id)},
+            {"$set": {"is_available": new_status, "updated_at": datetime.utcnow()}}
+        )
+
+        if result.modified_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Availability update failed"
+            )
+
+        return {
+            "message": f"Tier {'made available' if new_status else 'made unavailable'} successfully",
+            "is_available": new_status
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error toggling tier availability: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to toggle tier availability"
+        )
+
+
+@app.post("/services/{service_id}/toggle-availability")
+async def toggle_service_availability(
+        service_id: str,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    """Toggle available/unavailable status of a service"""
+    try:
+        service = db.services.find_one({"_id": ObjectId(service_id)})
+        if not service:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Service not found"
+            )
+
+        new_status = not service["isAvailable"]
+        result = db.services.update_one(
+            {"_id": ObjectId(service_id)},
+            {"$set": {"isAvailable": new_status, "updatedAt": datetime.utcnow()}}
+        )
+
+        if result.modified_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Availability update failed"
+            )
+
+        return {
+            "message": f"Service {'made available' if new_status else 'made unavailable'} successfully",
+            "isAvailable": new_status
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error toggling service availability: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to toggle service availability"
+        )
+
+
+# Batch operations
+@app.post("/service-categories/batch-update")
+async def batch_update_categories(
+        category_ids: List[str],
+        update_data: ServiceCategoryUpdate,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    """Update multiple service categories at once"""
+    try:
+        if not category_ids:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No category IDs provided"
+            )
+
+        # Validate all category IDs exist
+        valid_ids = []
+        for category_id in category_ids:
+            category = db.service_categories.find_one({"_id": ObjectId(category_id)})
+            if category:
+                valid_ids.append(ObjectId(category_id))
+
+        if not valid_ids:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No valid categories found"
+            )
+
+        update_fields = update_data.dict(exclude_unset=True)
+        if update_fields:
+            update_fields["updated_at"] = datetime.utcnow()
+            result = db.service_categories.update_many(
+                {"_id": {"$in": valid_ids}},
+                {"$set": update_fields}
+            )
+
+            return {
+                "message": f"Updated {result.modified_count} categories successfully",
+                "updated_count": result.modified_count
+            }
+        else:
+            return {"message": "No fields to update", "updated_count": 0}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in batch update categories: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to batch update categories"
+        )
+
+
+@app.delete("/service-categories/batch-delete")
+async def batch_delete_categories(
+        category_ids: List[str],
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    """Delete multiple service categories at once"""
+    try:
+        if not category_ids:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No category IDs provided"
+            )
+
+        # Check for dependencies for all categories
+        for category_id in category_ids:
+            tiers_count = db.service_tiers.count_documents({"category_id": category_id})
+            services_count = db.services.count_documents({"category_id": category_id})
+            bookings_count = db.bookings.count_documents({"serviceId": category_id})
+
+            if tiers_count > 0 or services_count > 0 or bookings_count > 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Cannot delete categories with existing dependencies. Category {category_id} has associated data."
+                )
+
+        # Convert to ObjectIds
+        object_ids = [ObjectId(category_id) for category_id in category_ids]
+
+        result = db.service_categories.delete_many({"_id": {"$in": object_ids}})
+
+        return {
+            "message": f"Deleted {result.deleted_count} categories successfully",
+            "deleted_count": result.deleted_count
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in batch delete categories: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to batch delete categories"
+        )
+
+
+# Search and filter endpoints
+@app.get("/service-categories/search")
+async def search_service_categories(
+        q: Optional[str] = None,
+        category_type: Optional[ServiceCategoryType] = None,
+        is_active: Optional[bool] = None,
+        skip: int = 0,
+        limit: int = 100
+):
+    """Search and filter service categories"""
+    try:
+        query = {}
+
+        if q:
+            query["$or"] = [
+                {"name": {"$regex": q, "$options": "i"}},
+                {"description": {"$regex": q, "$options": "i"}}
+            ]
+
+        if category_type:
+            query["category_type"] = category_type
+
+        if is_active is not None:
+            query["is_active"] = is_active
+
+        categories = list(db.service_categories.find(query).skip(skip).limit(limit))
+        total_count = db.service_categories.count_documents(query)
+
+        category_list = []
+        for category in categories:
+            # Get basic tier and service counts
+            tiers_count = db.service_tiers.count_documents({"category_id": str(category["_id"])})
+            services_count = db.services.count_documents({"category_id": str(category["_id"])})
+
+            category_data = ServiceCategory(
+                id=str(category["_id"]),
+                name=category["name"],
+                description=category["description"],
+                category_type=category["category_type"],
+                image=category.get("image"),
+                is_active=category["is_active"],
+                created_at=category["created_at"],
+                updated_at=category["updated_at"],
+                tiers=[],
+                services=[]
+            )
+
+            category_list.append({
+                **category_data.dict(),
+                "tiers_count": tiers_count,
+                "services_count": services_count
+            })
+
+        return {
+            "categories": category_list,
+            "total_count": total_count,
+            "page": skip // limit + 1 if limit > 0 else 1,
+            "per_page": limit
+        }
+
+    except Exception as e:
+        logger.error(f"Error searching service categories: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to search service categories"
+        )
+
+
 
 
 @app.post("/service-tiers/image")
