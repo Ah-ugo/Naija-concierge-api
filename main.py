@@ -184,25 +184,25 @@ class UserUpdate(BaseModel):
 
 
 class UserInDB(UserBase):
-    id: PyObjectId = Field(alias="_id", default_factory=ObjectId)
+    id: Optional[PyObjectId] = Field(alias="_id", default=None)
     role: str = "user"
     createdAt: datetime = Field(default_factory=datetime.utcnow)
     updatedAt: datetime = Field(default_factory=datetime.utcnow)
     hashed_password: str
 
-    @field_validator("id", mode="before")
-    def validate_id(cls, v):
-        if isinstance(v, str):
-            return ObjectId(v)
-        if isinstance(v, ObjectId):
-            return v
-        raise ValueError("id must be a valid ObjectId or string representation")
+    class Config:
+        populate_by_name = True
+        json_encoders = {
+            ObjectId: str
+        }
 
-    model_config = {
-        "populate_by_name": True,
-        "json_encoders": {ObjectId: str},
-        "arbitrary_types_allowed": True
-    }
+    @classmethod
+    def model_validate(cls, obj, **kwargs):
+        if isinstance(obj, dict) and '_id' in obj and isinstance(obj['_id'], ObjectId):
+            obj['_id'] = str(obj['_id'])
+        return super().model_validate(obj, **kwargs)
+
+
 
 class User(UserBase):
     id: str
@@ -857,7 +857,6 @@ def get_user(email: str):
         user["_id"] = str(user["_id"])
         return UserInDB(**user)
     return None
-
 
 def get_user_by_id(user_id: str):
     try:
