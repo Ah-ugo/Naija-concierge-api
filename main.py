@@ -184,7 +184,7 @@ class UserUpdate(BaseModel):
 
 
 class UserInDB(UserBase):
-    id: Optional[PyObjectId] = Field(alias="_id", default=None)
+    id: PyObjectId = Field(alias="_id", default_factory=ObjectId)
     role: str = "user"
     createdAt: datetime = Field(default_factory=datetime.utcnow)
     updatedAt: datetime = Field(default_factory=datetime.utcnow)
@@ -1324,30 +1324,40 @@ async def root():
     return {"message": "Welcome to Naija Concierge API"}
 
 
-# Auth routes (keeping existing)
+
 @app.post("/auth/register", response_model=Token)
 async def register(user: UserCreate):
+
     if db.users.find_one({"email": user.email}):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email already registered",
         )
 
+
     hashed_password = get_password_hash(user.password)
+
+
     user_dict = user.dict()
     del user_dict["password"]
+
+
     user_in_db = UserInDB(
         **user_dict,
         hashed_password=hashed_password,
-        role="user"
+        role="user",
+        _id=ObjectId()
     )
 
-    result = db.users.insert_one(user_in_db.dict(by_alias=True))
 
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": user.email}, expires_delta=access_token_expires
-    )
+    try:
+        result = db.users.insert_one(user_in_db.dict(by_alias=True))
+    except DuplicateKeyError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Duplicate key error, possibly email already exists"
+        )
+
 
     created_user = db.users.find_one({"_id": result.inserted_id})
     user_response = User(
@@ -1362,6 +1372,13 @@ async def register(user: UserCreate):
         createdAt=created_user["createdAt"],
         updatedAt=created_user["updatedAt"]
     )
+
+
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.email}, expires_delta=access_token_expires
+    )
+
 
     welcome_html = f"""
     <html>
@@ -1380,6 +1397,7 @@ async def register(user: UserCreate):
         "token_type": "bearer",
         "user": user_response
     }
+
 
 
 @app.post("/auth/token", response_model=Token)
