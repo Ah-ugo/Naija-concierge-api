@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, EmailStr, Field, GetJsonSchemaHandler, BeforeValidator, ValidationError
+from pydantic import BaseModel, EmailStr, Field, GetJsonSchemaHandler, BeforeValidator, ValidationError, field_validator
 from pydantic.json_schema import JsonSchemaValue
 from pydantic_core import core_schema
 from typing import List, Optional, Dict, Any, Union, Annotated
@@ -190,19 +190,19 @@ class UserInDB(UserBase):
     updatedAt: datetime = Field(default_factory=datetime.utcnow)
     hashed_password: str
 
+    @field_validator("id", mode="before")
+    def validate_id(cls, v):
+        if isinstance(v, str):
+            return ObjectId(v)
+        if isinstance(v, ObjectId):
+            return v
+        raise ValueError("id must be a valid ObjectId or string representation")
+
     model_config = {
         "populate_by_name": True,
-        "json_encoders": {
-            ObjectId: str
-        }
+        "json_encoders": {ObjectId: str},
+        "arbitrary_types_allowed": True
     }
-
-    @classmethod
-    def model_validate(cls, obj, **kwargs):
-        if isinstance(obj, dict) and '_id' in obj and isinstance(obj['_id'], ObjectId):
-            obj['_id'] = str(obj['_id'])
-        return super().model_validate(obj, **kwargs)
-
 
 class User(UserBase):
     id: str
@@ -1327,39 +1327,42 @@ async def root():
 
 @app.post("/auth/register", response_model=Token)
 async def register(user: UserCreate):
-
+    # Check if email is already registered
     if db.users.find_one({"email": user.email}):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email already registered",
         )
 
-
+    # Hash the password
     hashed_password = get_password_hash(user.password)
 
-
+    # Prepare user data for database insertion
     user_dict = user.dict()
     del user_dict["password"]
+    user_dict["hashed_password"] = hashed_password
+    user_dict["role"] = "user"
+    user_dict["createdAt"] = datetime.utcnow()
+    user_dict["updatedAt"] = datetime.utcnow()
 
-
-    user_in_db = UserInDB(
-        **user_dict,
-        hashed_password=hashed_password,
-        role="user",
-        _id=ObjectId()
-    )
-
-
+    # Insert user into database directly
     try:
-        result = db.users.insert_one(user_in_db.dict(by_alias=True))
-    except DuplicateKeyError:
+        result = db.users.insert_one(user_dict)
+    except Exception as e:
+        logger.error(f"Database insertion error: {e}")
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Duplicate key error, possibly email already exists"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create user"
         )
 
-
+    # Fetch the created user
     created_user = db.users.find_one({"_id": result.inserted_id})
+    if not created_user:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve created user"
+        )
+
     user_response = User(
         id=str(created_user["_id"]),
         email=created_user["email"],
@@ -1373,24 +1376,24 @@ async def register(user: UserCreate):
         updatedAt=created_user["updatedAt"]
     )
 
-
+    # Generate access token
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": user.email}, expires_delta=access_token_expires
     )
 
-
+    # Send welcome email
     welcome_html = f"""
     <html>
         <body>
-            <h1>Welcome to Naija Concierge, {user.firstName}!</h1>
-            <p>Thank you for registering with us. We're excited to help you experience Lagos like never before.</p>
+            <h1>Welcome to Sorted Concierge, {user.firstName}!</h1>
+            <p>Thank you for registering with us. We're excited to help you experience Luxury like never before.</p>
             <p>If you have any questions or need assistance, please don't hesitate to contact us.</p>
             <p>Best regards,<br>The Naija Concierge Team</p>
         </body>
     </html>
     """
-    send_email(user.email, "Welcome to Naija Concierge", welcome_html)
+    send_email(user.email, "Welcome to Sorted Concierge", welcome_html)
 
     return {
         "access_token": access_token,
