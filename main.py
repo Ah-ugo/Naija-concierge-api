@@ -828,6 +828,18 @@ class BookingAdvancedFilters(BaseModel):
 
 
 
+class AdminStats(BaseModel):
+    totalUsers: int
+    totalBookings: int
+    totalBookingRevenue: float
+    totalServiceTiers: int
+    userGrowth: float
+    bookingGrowth: float
+    revenueGrowth: float
+    tierGrowth: float
+
+
+
 
 
 # Helper functions
@@ -7417,19 +7429,19 @@ async def get_admin_stats(current_user: UserInDB = Depends(get_admin_user)):
         # Get total bookings
         total_bookings = db.bookings.count_documents({})
 
-        # Get total revenue
-        bookings = list(db.bookings.find({"status": {"$in": ["confirmed", "completed"]}}))
-        total_revenue = 0
-        for booking in bookings:
-            try:
-                service = db.services.find_one({"_id": ObjectId(booking["serviceId"])})
-                if service:
-                    total_revenue += service["price"]
-            except Exception:
-                pass
+        # Get total booking revenue (from successful payments)
+        total_booking_revenue = 0
+        successful_bookings = list(db.bookings.find({
+            "payment_status": "successful",
+            "payment_amount": {"$exists": True, "$ne": None}
+        }))
 
-        # Get active packages
-        active_packages = db.subscriptions.count_documents({"status": "active"})
+        for booking in successful_bookings:
+            if booking.get("payment_amount"):
+                total_booking_revenue += booking["payment_amount"]
+
+        # Get total service tiers
+        total_service_tiers = db.service_tiers.count_documents({})
 
         # Get user growth (last 30 days)
         thirty_days_ago = datetime.utcnow() - timedelta(days=30)
@@ -7443,55 +7455,48 @@ async def get_admin_stats(current_user: UserInDB = Depends(get_admin_user)):
         # Get revenue growth (compare last 30 days with previous 30 days)
         last_30_days_bookings = list(db.bookings.find({
             "createdAt": {"$gte": thirty_days_ago},
-            "status": {"$in": ["confirmed", "completed"]}
+            "payment_status": "successful",
+            "payment_amount": {"$exists": True, "$ne": None}
         }))
+
         last_30_days_revenue = 0
         for booking in last_30_days_bookings:
-            try:
-                service = db.services.find_one({"_id": ObjectId(booking["serviceId"])})
-                if service:
-                    last_30_days_revenue += service["price"]
-            except Exception:
-                pass
+            if booking.get("payment_amount"):
+                last_30_days_revenue += booking["payment_amount"]
 
         previous_30_days_start = thirty_days_ago - timedelta(days=30)
         previous_30_days_bookings = list(db.bookings.find({
             "createdAt": {"$gte": previous_30_days_start, "$lt": thirty_days_ago},
-            "status": {"$in": ["confirmed", "completed"]}
+            "payment_status": "successful",
+            "payment_amount": {"$exists": True, "$ne": None}
         }))
+
         previous_30_days_revenue = 0
         for booking in previous_30_days_bookings:
-            try:
-                service = db.services.find_one({"_id": ObjectId(booking["serviceId"])})
-                if service:
-                    previous_30_days_revenue += service["price"]
-            except Exception:
-                pass
+            if booking.get("payment_amount"):
+                previous_30_days_revenue += booking["payment_amount"]
 
         revenue_growth = ((
                                       last_30_days_revenue - previous_30_days_revenue) / previous_30_days_revenue) * 100 if previous_30_days_revenue > 0 else 0
 
-        # Get package growth (compare active packages with previous month)
-        current_active_packages = db.subscriptions.count_documents({
-            "status": "active",
-            "startDate": {"$gte": thirty_days_ago}
+        # Get tier growth (compare current tiers with previous month)
+        current_tiers = db.service_tiers.count_documents({
+            "created_at": {"$gte": thirty_days_ago}
         })
-        previous_active_packages = db.subscriptions.count_documents({
-            "status": "active",
-            "startDate": {"$gte": previous_30_days_start, "$lt": thirty_days_ago}
+        previous_tiers = db.service_tiers.count_documents({
+            "created_at": {"$gte": previous_30_days_start, "$lt": thirty_days_ago}
         })
-        package_growth = ((
-                                      current_active_packages - previous_active_packages) / previous_active_packages) * 100 if previous_active_packages > 0 else 0
+        tier_growth = ((current_tiers - previous_tiers) / previous_tiers) * 100 if previous_tiers > 0 else 0
 
         return {
             "totalUsers": total_users,
             "totalBookings": total_bookings,
-            "totalRevenue": total_revenue,
-            "activePackages": active_packages,
+            "totalBookingRevenue": total_booking_revenue,  # Changed from totalRevenue
+            "totalServiceTiers": total_service_tiers,  # Changed from activePackages
             "userGrowth": round(user_growth, 1),
             "bookingGrowth": round(booking_growth, 1),
             "revenueGrowth": round(revenue_growth, 1),
-            "packageGrowth": round(package_growth, 1)
+            "tierGrowth": round(tier_growth, 1)  # Changed from packageGrowth
         }
     except Exception as e:
         logger.error(f"Error getting admin stats: {e}")
@@ -7499,8 +7504,6 @@ async def get_admin_stats(current_user: UserInDB = Depends(get_admin_user)):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to get admin stats",
         )
-
-
 
 
 @app.get("/analytics/chart-data", response_model=ChartDataResponse)
