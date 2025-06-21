@@ -4,7 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="3e0dd151-8051-4749-8783-8535006b41f5" name="Changes" comment="fix service &amp; package structures">
+    <list default="true" id="3e0dd151-8051-4749-8783-8535006b41f5" name="Changes" comment="user booking management">
       <change afterPath="$PROJECT_DIR$/new.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
@@ -221,7 +221,15 @@
       <option name="project" value="LOCAL" />
       <updated>1750403214317</updated>
     </task>
-    <option name="localTasksCounter" value="18" />
+    <task id="LOCAL-00018" summary="user booking management">
+      <option name="closed" value="true" />
+      <created>1750423143907</created>
+      <option name="number" value="00018" />
+      <option name="presentableId" value="LOCAL-00018" />
+      <option name="project" value="LOCAL" />
+      <updated>1750423143908</updated>
+    </task>
+    <option name="localTasksCounter" value="19" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -233,6 +241,7 @@
     <MESSAGE value="admin chart data" />
     <MESSAGE value="fixed multi currency payment" />
     <MESSAGE value="fix service &amp; package structures" />
-    <option name="LAST_COMMIT_MESSAGE" value="fix service &amp; package structures" />
+    <MESSAGE value="user booking management" />
+    <option name="LAST_COMMIT_MESSAGE" value="user booking management" />
   </component>
 </project>

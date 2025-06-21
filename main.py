@@ -769,6 +769,66 @@ class BookingHistory(BaseModel):
 
 
 
+class BookingStatusUpdate(BaseModel):
+    status: str
+    admin_notes: Optional[str] = None
+    notify_user: bool = True
+
+
+class BookingAssignment(BaseModel):
+    assigned_to: Optional[str] = None  # Staff/vendor ID or name
+    assignment_notes: Optional[str] = None
+    notify_assignee: bool = True
+
+
+class AdminBookingUpdate(BaseModel):
+    bookingDate: Optional[datetime] = None
+    status: Optional[str] = None
+    specialRequests: Optional[str] = None
+    contact_preference: Optional[str] = None
+    payment_status: Optional[PaymentStatus] = None
+    payment_amount: Optional[float] = None
+    admin_notes: Optional[str] = None
+    assigned_to: Optional[str] = None
+    priority: Optional[str] = None  # low, medium, high, urgent
+
+
+class BookingAdminNote(BaseModel):
+    note: str
+    note_type: Optional[str] = "general"  # general, important, warning, follow_up
+
+
+class BulkBookingAction(BaseModel):
+    booking_ids: List[str]
+    action: str  # update_status, assign, delete, etc.
+    data: Dict[str, Any]
+
+
+class BookingRevenueStats(BaseModel):
+    total_revenue: float
+    monthly_revenue: float
+    daily_average: float
+    top_services: List[Dict[str, Any]]
+    payment_breakdown: Dict[str, Any]
+
+
+class BookingAdvancedFilters(BaseModel):
+    user_email: Optional[str] = None
+    user_name: Optional[str] = None
+    date_from: Optional[datetime] = None
+    date_to: Optional[datetime] = None
+    status: Optional[str] = None
+    booking_type: Optional[BookingType] = None
+    payment_status: Optional[PaymentStatus] = None
+    assigned_to: Optional[str] = None
+    min_amount: Optional[float] = None
+    max_amount: Optional[float] = None
+    has_special_requests: Optional[bool] = None
+    priority: Optional[str] = None
+
+
+
+
 
 # Helper functions
 def verify_password(plain_password, hashed_password):
@@ -5589,6 +5649,943 @@ async def create_airtable_booking(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to create booking: {str(e)}"
         )
+
+
+
+
+@app.get("/admin/bookings", response_model=List[Booking])
+async def admin_get_all_bookings(
+        skip: int = 0,
+        limit: int = 100,
+        status: Optional[str] = Query(None),
+        booking_type: Optional[BookingType] = Query(None),
+        payment_status: Optional[PaymentStatus] = Query(None),
+        user_email: Optional[str] = Query(None),
+        date_from: Optional[datetime] = Query(None),
+        date_to: Optional[datetime] = Query(None),
+        search: Optional[str] = Query(None),
+        sort_by: Optional[str] = Query("createdAt"),
+        sort_order: Optional[str] = Query("desc"),
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    """Get all bookings with advanced filtering for admin"""
+    try:
+        query = {}
+
+        # Apply filters
+        if status:
+            query["status"] = status
+        if booking_type:
+            query["booking_type"] = booking_type
+        if payment_status:
+            query["payment_status"] = payment_status
+        if user_email:
+            user = db.users.find_one({"email": {"$regex": user_email, "$options": "i"}})
+            if user:
+                query["userId"] = str(user["_id"])
+            else:
+                return []  # No user found with that email
+
+        if date_from or date_to:
+            date_filter = {}
+            if date_from:
+                date_filter["$gte"] = date_from
+            if date_to:
+                date_filter["$lte"] = date_to
+            query["bookingDate"] = date_filter
+
+        # Search across multiple fields
+        if search:
+            users = list(db.users.find({
+                "$or": [
+                    {"firstName": {"$regex": search, "$options": "i"}},
+                    {"lastName": {"$regex": search, "$options": "i"}},
+                    {"email": {"$regex": search, "$options": "i"}}
+                ]
+            }))
+            user_ids = [str(user["_id"]) for user in users]
+
+            search_conditions = [
+                {"userId": {"$in": user_ids}},
+                {"specialRequests": {"$regex": search, "$options": "i"}},
+                {"admin_notes": {"$regex": search, "$options": "i"}},
+                {"payment_reference": {"$regex": search, "$options": "i"}}
+            ]
+
+            if "$or" in query:
+                query["$and"] = [{"$or": query["$or"]}, {"$or": search_conditions}]
+                del query["$or"]
+            else:
+                query["$or"] = search_conditions
+
+        # Sort configuration
+        sort_direction = -1 if sort_order.lower() == "desc" else 1
+        sort_field = sort_by if sort_by in ["createdAt", "bookingDate", "updatedAt", "status"] else "createdAt"
+
+        bookings = list(
+            db.bookings.find(query)
+            .sort(sort_field, sort_direction)
+            .skip(skip)
+            .limit(limit)
+        )
+
+        result = []
+        for booking in bookings:
+            try:
+                # Get user info
+                user = get_user_by_id(booking["userId"])
+
+                # Get service/tier details (same logic as existing endpoints)
+                service_obj = None
+                tier_obj = None
+
+                if booking.get("serviceId"):
+                    service = db.services.find_one({"_id": ObjectId(booking["serviceId"])})
+                    if service:
+                        service_obj = Service(
+                            id=str(service["_id"]),
+                            name=service["name"],
+                            description=service["description"],
+                            image=service.get("image"),
+                            duration=service["duration"],
+                            isAvailable=service["isAvailable"],
+                            features=service.get("features", []),
+                            requirements=service.get("requirements", []),
+                            category_id=service.get("category_id"),
+                            tier_id=service.get("tier_id"),
+                            createdAt=service["createdAt"],
+                            updatedAt=service["updatedAt"]
+                        )
+
+                if booking.get("tierId"):
+                    tier = db.service_tiers.find_one({"_id": ObjectId(booking["tierId"])})
+                    if tier:
+                        tier_service_objects = []
+                        tier_services = list(db.services.find({"tier_id": booking["tierId"]}))
+                        for service in tier_services:
+                            tier_service_objects.append(
+                                Service(
+                                    id=str(service["_id"]),
+                                    name=service["name"],
+                                    description=service["description"],
+                                    image=service.get("image"),
+                                    duration=service["duration"],
+                                    isAvailable=service["isAvailable"],
+                                    features=service.get("features", []),
+                                    requirements=service.get("requirements", []),
+                                    category_id=service.get("category_id"),
+                                    tier_id=service.get("tier_id"),
+                                    createdAt=service["createdAt"],
+                                    updatedAt=service["updatedAt"]
+                                )
+                            )
+
+                        tier_obj = ServiceTier(
+                            id=str(tier["_id"]),
+                            name=tier["name"],
+                            description=tier["description"],
+                            price=tier["price"],
+                            category_id=tier["category_id"],
+                            image=tier.get("image"),
+                            features=tier.get("features", []),
+                            is_popular=tier.get("is_popular", False),
+                            is_available=tier.get("is_available", True),
+                            created_at=tier["created_at"],
+                            updated_at=tier["updated_at"],
+                            services=tier_service_objects
+                        )
+
+                booking_obj = Booking(
+                    id=str(booking["_id"]),
+                    userId=booking["userId"],
+                    serviceId=booking.get("serviceId"),
+                    tierId=booking.get("tierId"),
+                    bookingDate=booking["bookingDate"],
+                    status=booking["status"],
+                    specialRequests=booking.get("specialRequests"),
+                    booking_type=booking.get("booking_type", BookingType.CONSULTATION),
+                    contact_preference=booking.get("contact_preference"),
+                    payment_required=booking.get("payment_required", False),
+                    payment_amount=booking.get("payment_amount"),
+                    payment_url=booking.get("payment_url"),
+                    payment_status=booking.get("payment_status", PaymentStatus.PENDING),
+                    payment_reference=booking.get("payment_reference"),
+                    flutterwave_tx_ref=booking.get("flutterwave_tx_ref"),
+                    createdAt=booking["createdAt"],
+                    updatedAt=booking["updatedAt"],
+                    service=service_obj,
+                    tier=tier_obj
+                )
+
+                # Add user info to the response (extend the model if needed)
+                booking_dict = booking_obj.dict()
+                if user:
+                    booking_dict["user_info"] = {
+                        "firstName": user.firstName,
+                        "lastName": user.lastName,
+                        "email": user.email,
+                        "phone": user.phone
+                    }
+                booking_dict["admin_notes"] = booking.get("admin_notes", "")
+                booking_dict["assigned_to"] = booking.get("assigned_to", "")
+                booking_dict["priority"] = booking.get("priority", "medium")
+
+                result.append(booking_dict)
+
+            except Exception as e:
+                logger.error(f"Error processing booking {booking.get('_id')}: {e}")
+                continue
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Error fetching admin bookings: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch bookings"
+        )
+
+
+@app.put("/admin/bookings/{booking_id}")
+async def admin_update_booking(
+        booking_id: str,
+        booking_update: AdminBookingUpdate,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    """Update any booking as admin"""
+    try:
+        booking = db.bookings.find_one({"_id": ObjectId(booking_id)})
+        if not booking:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Booking not found"
+            )
+
+        update_data = booking_update.dict(exclude_unset=True)
+        if update_data:
+            update_data["updatedAt"] = datetime.utcnow()
+            update_data["last_updated_by"] = str(current_user.id)
+
+            # Track status changes
+            if "status" in update_data and update_data["status"] != booking["status"]:
+                update_data["status_history"] = booking.get("status_history", [])
+                update_data["status_history"].append({
+                    "previous_status": booking["status"],
+                    "new_status": update_data["status"],
+                    "changed_by": str(current_user.id),
+                    "changed_at": datetime.utcnow(),
+                    "notes": update_data.get("admin_notes", "")
+                })
+
+            result = db.bookings.update_one(
+                {"_id": ObjectId(booking_id)},
+                {"$set": update_data}
+            )
+
+            if result.modified_count == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Booking update failed"
+                )
+
+            # Get user and send notification if status changed
+            if "status" in update_data:
+                user = get_user_by_id(booking["userId"])
+                if user:
+                    service_name = "Service"
+                    if booking.get("serviceId"):
+                        service = db.services.find_one({"_id": ObjectId(booking["serviceId"])})
+                        if service:
+                            service_name = service["name"]
+                    elif booking.get("tierId"):
+                        tier = db.service_tiers.find_one({"_id": ObjectId(booking["tierId"])})
+                        if tier:
+                            service_name = tier["name"]
+
+                    status_update_html = f"""
+                    <html>
+                        <body>
+                            <h1>Booking Status Update</h1>
+                            <p>Dear {user.firstName},</p>
+                            <p>Your booking for {service_name} has been updated.</p>
+                            <p>New Status: <strong>{update_data['status'].title()}</strong></p>
+                            <p>Booking Date: {booking['bookingDate'].strftime('%Y-%m-%d %H:%M')}</p>
+                            {f"<p>Notes: {update_data.get('admin_notes', '')}</p>" if update_data.get('admin_notes') else ""}
+                            <p>If you have any questions, please contact us.</p>
+                            <p>Best regards,<br>The Naija Concierge Team</p>
+                        </body>
+                    </html>
+                    """
+                    send_email(user.email, f"Booking Status Update - {service_name}", status_update_html)
+
+        return {"message": "Booking updated successfully"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating booking: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update booking"
+        )
+
+
+@app.delete("/admin/bookings/{booking_id}")
+async def admin_delete_booking(
+        booking_id: str,
+        reason: Optional[str] = None,
+        notify_user: bool = True,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    """Delete any booking as admin"""
+    try:
+        booking = db.bookings.find_one({"_id": ObjectId(booking_id)})
+        if not booking:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Booking not found"
+            )
+
+        # Get user info before deletion for notification
+        user = get_user_by_id(booking["userId"])
+
+        # Get service/tier name for notification
+        service_name = "Service"
+        if booking.get("serviceId"):
+            service = db.services.find_one({"_id": ObjectId(booking["serviceId"])})
+            if service:
+                service_name = service["name"]
+        elif booking.get("tierId"):
+            tier = db.service_tiers.find_one({"_id": ObjectId(booking["tierId"])})
+            if tier:
+                service_name = tier["name"]
+
+        # Archive the booking before deletion (optional)
+        archive_data = {
+            **booking,
+            "deleted_at": datetime.utcnow(),
+            "deleted_by": str(current_user.id),
+            "deletion_reason": reason
+        }
+        db.archived_bookings.insert_one(archive_data)
+
+        # Delete the booking
+        result = db.bookings.delete_one({"_id": ObjectId(booking_id)})
+
+        if result.deleted_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Booking deletion failed"
+            )
+
+        # Notify user if requested
+        if notify_user and user:
+            deletion_html = f"""
+            <html>
+                <body>
+                    <h1>Booking Cancelled</h1>
+                    <p>Dear {user.firstName},</p>
+                    <p>Your booking for {service_name} has been cancelled by our team.</p>
+                    <p>Booking Details:</p>
+                    <ul>
+                        <li>Service: {service_name}</li>
+                        <li>Original Date: {booking['bookingDate'].strftime('%Y-%m-%d %H:%M')}</li>
+                        <li>Reason: {reason or 'Administrative cancellation'}</li>
+                    </ul>
+                    <p>If you have any questions or would like to reschedule, please contact us.</p>
+                    <p>Best regards,<br>The Naija Concierge Team</p>
+                </body>
+            </html>
+            """
+            send_email(user.email, f"Booking Cancelled - {service_name}", deletion_html)
+
+        return {"message": "Booking deleted successfully"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting booking: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete booking"
+        )
+
+
+@app.put("/admin/bookings/{booking_id}/status")
+async def admin_update_booking_status(
+        booking_id: str,
+        status_update: BookingStatusUpdate,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    """Update booking status with notifications"""
+    try:
+        booking = db.bookings.find_one({"_id": ObjectId(booking_id)})
+        if not booking:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Booking not found"
+            )
+
+        # Validate status
+        valid_statuses = ["pending", "confirmed", "completed", "cancelled", "in_progress", "on_hold"]
+        if status_update.status not in valid_statuses:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid status. Must be one of: {', '.join(valid_statuses)}"
+            )
+
+        update_data = {
+            "status": status_update.status,
+            "updatedAt": datetime.utcnow(),
+            "last_updated_by": str(current_user.id)
+        }
+
+        if status_update.admin_notes:
+            update_data["admin_notes"] = status_update.admin_notes
+
+        # Add to status history
+        status_history = booking.get("status_history", [])
+        status_history.append({
+            "previous_status": booking["status"],
+            "new_status": status_update.status,
+            "changed_by": str(current_user.id),
+            "changed_at": datetime.utcnow(),
+            "notes": status_update.admin_notes or ""
+        })
+        update_data["status_history"] = status_history
+
+        result = db.bookings.update_one(
+            {"_id": ObjectId(booking_id)},
+            {"$set": update_data}
+        )
+
+        if result.modified_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Status update failed"
+            )
+
+        # Send notification to user if requested
+        if status_update.notify_user:
+            user = get_user_by_id(booking["userId"])
+            if user:
+                service_name = "Service"
+                if booking.get("serviceId"):
+                    service = db.services.find_one({"_id": ObjectId(booking["serviceId"])})
+                    if service:
+                        service_name = service["name"]
+                elif booking.get("tierId"):
+                    tier = db.service_tiers.find_one({"_id": ObjectId(booking["tierId"])})
+                    if tier:
+                        service_name = tier["name"]
+
+                status_html = f"""
+                <html>
+                    <body>
+                        <h1>Booking Status Update</h1>
+                        <p>Dear {user.firstName},</p>
+                        <p>Your booking for {service_name} has been updated to: <strong>{status_update.status.title()}</strong></p>
+                        <p>Booking Date: {booking['bookingDate'].strftime('%Y-%m-%d %H:%M')}</p>
+                        {f"<p>Update Notes: {status_update.admin_notes}</p>" if status_update.admin_notes else ""}
+                        <p>Best regards,<br>The Naija Concierge Team</p>
+                    </body>
+                </html>
+                """
+                send_email(user.email, f"Booking Status Update - {service_name}", status_html)
+
+        return {"message": f"Booking status updated to {status_update.status}"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating booking status: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update booking status"
+        )
+
+
+@app.put("/admin/bookings/{booking_id}/assign")
+async def admin_assign_booking(
+        booking_id: str,
+        assignment: BookingAssignment,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    """Assign booking to staff member or vendor"""
+    try:
+        booking = db.bookings.find_one({"_id": ObjectId(booking_id)})
+        if not booking:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Booking not found"
+            )
+
+        update_data = {
+            "assigned_to": assignment.assigned_to,
+            "assignment_notes": assignment.assignment_notes,
+            "updatedAt": datetime.utcnow(),
+            "assigned_by": str(current_user.id),
+            "assigned_at": datetime.utcnow()
+        }
+
+        result = db.bookings.update_one(
+            {"_id": ObjectId(booking_id)},
+            {"$set": update_data}
+        )
+
+        if result.modified_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Assignment failed"
+            )
+
+        # Log assignment history
+        assignment_log = {
+            "booking_id": booking_id,
+            "assigned_to": assignment.assigned_to,
+            "assigned_by": str(current_user.id),
+            "assigned_at": datetime.utcnow(),
+            "notes": assignment.assignment_notes
+        }
+        db.assignment_history.insert_one(assignment_log)
+
+        return {"message": f"Booking assigned to {assignment.assigned_to}"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error assigning booking: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to assign booking"
+        )
+
+
+@app.get("/admin/bookings/stats")
+async def admin_get_booking_stats(
+        date_from: Optional[datetime] = Query(None),
+        date_to: Optional[datetime] = Query(None),
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    """Get comprehensive booking statistics for admin dashboard"""
+    try:
+        # Build date filter
+        date_filter = {}
+        if date_from:
+            date_filter["$gte"] = date_from
+        if date_to:
+            date_filter["$lte"] = date_to
+
+        query = {}
+        if date_filter:
+            query["createdAt"] = date_filter
+
+        # Get all bookings in date range
+        all_bookings = list(db.bookings.find(query))
+
+        # Basic counts
+        total_bookings = len(all_bookings)
+        pending_bookings = len([b for b in all_bookings if b["status"] == "pending"])
+        confirmed_bookings = len([b for b in all_bookings if b["status"] == "confirmed"])
+        completed_bookings = len([b for b in all_bookings if b["status"] == "completed"])
+        cancelled_bookings = len([b for b in all_bookings if b["status"] == "cancelled"])
+
+        # Revenue calculations
+        total_revenue = sum(b.get("payment_amount", 0) for b in all_bookings
+                            if b.get("payment_status") == "successful")
+
+        pending_revenue = sum(b.get("payment_amount", 0) for b in all_bookings
+                              if b.get("payment_status") == "pending" and b.get("payment_required"))
+
+        # Booking type breakdown
+        consultation_bookings = len([b for b in all_bookings if b.get("booking_type") == "consultation"])
+        tier_bookings = len([b for b in all_bookings if b.get("booking_type") == "tier_booking"])
+
+        # Payment status breakdown
+        successful_payments = len([b for b in all_bookings if b.get("payment_status") == "successful"])
+        pending_payments = len([b for b in all_bookings if b.get("payment_status") == "pending"])
+        failed_payments = len([b for b in all_bookings if b.get("payment_status") == "failed"])
+
+        # Top services/tiers
+        service_counts = {}
+        tier_counts = {}
+
+        for booking in all_bookings:
+            if booking.get("serviceId"):
+                service = db.services.find_one({"_id": ObjectId(booking["serviceId"])})
+                if service:
+                    service_name = service["name"]
+                    service_counts[service_name] = service_counts.get(service_name, 0) + 1
+
+            if booking.get("tierId"):
+                tier = db.service_tiers.find_one({"_id": ObjectId(booking["tierId"])})
+                if tier:
+                    tier_name = tier["name"]
+                    tier_counts[tier_name] = tier_counts.get(tier_name, 0) + 1
+
+        # Sort and get top 5
+        top_services = sorted(service_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+        top_tiers = sorted(tier_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+
+        # Average booking value
+        paid_bookings = [b for b in all_bookings if b.get("payment_amount", 0) > 0]
+        avg_booking_value = (
+                    sum(b["payment_amount"] for b in paid_bookings) / len(paid_bookings)) if paid_bookings else 0
+
+        # Conversion rate (confirmed + completed vs total)
+        conversion_rate = (
+                    (confirmed_bookings + completed_bookings) / total_bookings * 100) if total_bookings > 0 else 0
+
+        return {
+            "total_bookings": total_bookings,
+            "pending_bookings": pending_bookings,
+            "confirmed_bookings": confirmed_bookings,
+            "completed_bookings": completed_bookings,
+            "cancelled_bookings": cancelled_bookings,
+            "total_revenue": total_revenue,
+            "pending_revenue": pending_revenue,
+            "consultation_bookings": consultation_bookings,
+            "tier_bookings": tier_bookings,
+            "successful_payments": successful_payments,
+            "pending_payments": pending_payments,
+            "failed_payments": failed_payments,
+            "top_services": [{"name": name, "count": count} for name, count in top_services],
+            "top_tiers": [{"name": name, "count": count} for name, count in top_tiers],
+            "average_booking_value": round(avg_booking_value, 2),
+            "conversion_rate": round(conversion_rate, 2),
+            "date_range": {
+                "from": date_from.isoformat() if date_from else None,
+                "to": date_to.isoformat() if date_to else None
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting booking stats: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get booking statistics"
+        )
+
+
+@app.post("/admin/bookings/bulk-update")
+async def admin_bulk_update_bookings(
+        bulk_action: BulkBookingAction,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    """Perform bulk operations on multiple bookings"""
+    try:
+        if not bulk_action.booking_ids:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No booking IDs provided"
+            )
+
+        # Validate all booking IDs exist
+        valid_ids = []
+        for booking_id in bulk_action.booking_ids:
+            if db.bookings.find_one({"_id": ObjectId(booking_id)}):
+                valid_ids.append(ObjectId(booking_id))
+
+        if not valid_ids:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No valid bookings found"
+            )
+
+        updated_count = 0
+
+        if bulk_action.action == "update_status":
+            new_status = bulk_action.data.get("status")
+            if not new_status:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Status is required for update_status action"
+                )
+
+            update_data = {
+                "status": new_status,
+                "updatedAt": datetime.utcnow(),
+                "last_updated_by": str(current_user.id)
+            }
+
+            if bulk_action.data.get("admin_notes"):
+                update_data["admin_notes"] = bulk_action.data["admin_notes"]
+
+            result = db.bookings.update_many(
+                {"_id": {"$in": valid_ids}},
+                {"$set": update_data}
+            )
+            updated_count = result.modified_count
+
+        elif bulk_action.action == "assign":
+            assigned_to = bulk_action.data.get("assigned_to")
+            if not assigned_to:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="assigned_to is required for assign action"
+                )
+
+            update_data = {
+                "assigned_to": assigned_to,
+                "updatedAt": datetime.utcnow(),
+                "assigned_by": str(current_user.id),
+                "assigned_at": datetime.utcnow()
+            }
+
+            if bulk_action.data.get("assignment_notes"):
+                update_data["assignment_notes"] = bulk_action.data["assignment_notes"]
+
+            result = db.bookings.update_many(
+                {"_id": {"$in": valid_ids}},
+                {"$set": update_data}
+            )
+            updated_count = result.modified_count
+
+        elif bulk_action.action == "delete":
+            # Archive before deleting
+            bookings_to_archive = list(db.bookings.find({"_id": {"$in": valid_ids}}))
+            for booking in bookings_to_archive:
+                archive_data = {
+                    **booking,
+                    "deleted_at": datetime.utcnow(),
+                    "deleted_by": str(current_user.id),
+                    "deletion_reason": bulk_action.data.get("reason", "Bulk deletion")
+                }
+                db.archived_bookings.insert_one(archive_data)
+
+            result = db.bookings.delete_many({"_id": {"$in": valid_ids}})
+            updated_count = result.deleted_count
+
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid action. Supported actions: update_status, assign, delete"
+            )
+
+        return {
+            "message": f"Bulk {bulk_action.action} completed",
+            "updated_count": updated_count,
+            "total_requested": len(bulk_action.booking_ids)
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in bulk booking operation: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to perform bulk operation"
+        )
+
+
+@app.post("/admin/bookings/{booking_id}/notes")
+async def admin_add_booking_note(
+        booking_id: str,
+        note: BookingAdminNote,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    """Add admin note to booking"""
+    try:
+        booking = db.bookings.find_one({"_id": ObjectId(booking_id)})
+        if not booking:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Booking not found"
+            )
+
+        new_note = {
+            "note": note.note,
+            "note_type": note.note_type,
+            "added_by": str(current_user.id),
+            "added_at": datetime.utcnow()
+        }
+
+        admin_notes = booking.get("admin_notes_history", [])
+        admin_notes.append(new_note)
+
+        result = db.bookings.update_one(
+            {"_id": ObjectId(booking_id)},
+            {"$set": {
+                "admin_notes": note.note,  # Keep the latest note in main field
+                "admin_notes_history": admin_notes,
+                "updatedAt": datetime.utcnow()
+            }}
+        )
+
+        if result.modified_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Failed to add note"
+            )
+
+        return {"message": "Note added successfully"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error adding booking note: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to add note"
+        )
+
+
+@app.get("/admin/bookings/export")
+async def admin_export_bookings(
+        format: str = Query("csv", regex="^(csv|json)$"),
+        date_from: Optional[datetime] = Query(None),
+        date_to: Optional[datetime] = Query(None),
+        status: Optional[str] = Query(None),
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    """Export bookings data in CSV or JSON format"""
+    try:
+        query = {}
+
+        if date_from or date_to:
+            date_filter = {}
+            if date_from:
+                date_filter["$gte"] = date_from
+            if date_to:
+                date_filter["$lte"] = date_to
+            query["createdAt"] = date_filter
+
+        if status:
+            query["status"] = status
+
+        bookings = list(db.bookings.find(query))
+
+        export_data = []
+        for booking in bookings:
+            # Get user info
+            user = get_user_by_id(booking["userId"])
+
+            # Get service/tier info
+            service_name = ""
+            service_type = ""
+            if booking.get("serviceId"):
+                service = db.services.find_one({"_id": ObjectId(booking["serviceId"])})
+                if service:
+                    service_name = service["name"]
+                    service_type = "Individual Service"
+            elif booking.get("tierId"):
+                tier = db.service_tiers.find_one({"_id": ObjectId(booking["tierId"])})
+                if tier:
+                    service_name = tier["name"]
+                    service_type = "Tier Booking"
+
+            export_record = {
+                "booking_id": str(booking["_id"]),
+                "user_name": f"{user.firstName} {user.lastName}" if user else "Unknown",
+                "user_email": user.email if user else "Unknown",
+                "user_phone": user.phone if user else "",
+                "service_name": service_name,
+                "service_type": service_type,
+                "booking_date": booking["bookingDate"].isoformat(),
+                "status": booking["status"],
+                "booking_type": booking.get("booking_type", ""),
+                "payment_required": booking.get("payment_required", False),
+                "payment_amount": booking.get("payment_amount", 0),
+                "payment_status": booking.get("payment_status", ""),
+                "special_requests": booking.get("specialRequests", ""),
+                "admin_notes": booking.get("admin_notes", ""),
+                "assigned_to": booking.get("assigned_to", ""),
+                "created_at": booking["createdAt"].isoformat(),
+                "updated_at": booking["updatedAt"].isoformat()
+            }
+            export_data.append(export_record)
+
+        if format == "json":
+            return {
+                "data": export_data,
+                "total_records": len(export_data),
+                "exported_at": datetime.utcnow().isoformat()
+            }
+
+        # For CSV format, you would typically return a file response
+        # This is a simplified version that returns CSV-like data
+        return {
+            "message": "CSV export functionality would be implemented here",
+            "records_count": len(export_data),
+            "sample_data": export_data[:5] if export_data else []
+        }
+
+    except Exception as e:
+        logger.error(f"Error exporting bookings: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to export bookings"
+        )
+
+
+@app.get("/admin/bookings/{booking_id}/history")
+async def admin_get_booking_history(
+        booking_id: str,
+        current_user: UserInDB = Depends(get_admin_user)
+):
+    """Get detailed history of a booking including all changes"""
+    try:
+        booking = db.bookings.find_one({"_id": ObjectId(booking_id)})
+        if not booking:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Booking not found"
+            )
+
+        # Get status history
+        status_history = booking.get("status_history", [])
+
+        # Get notes history
+        notes_history = booking.get("admin_notes_history", [])
+
+        # Get assignment history
+        assignment_history = list(db.assignment_history.find({"booking_id": booking_id}))
+
+        # Combine and sort all history by timestamp
+        all_history = []
+
+        for entry in status_history:
+            all_history.append({
+                "type": "status_change",
+                "timestamp": entry["changed_at"],
+                "data": entry
+            })
+
+        for entry in notes_history:
+            all_history.append({
+                "type": "note_added",
+                "timestamp": entry["added_at"],
+                "data": entry
+            })
+
+        for entry in assignment_history:
+            all_history.append({
+                "type": "assignment",
+                "timestamp": entry["assigned_at"],
+                "data": entry
+            })
+
+        # Sort by timestamp (newest first)
+        all_history.sort(key=lambda x: x["timestamp"], reverse=True)
+
+        return {
+            "booking_id": booking_id,
+            "current_status": booking["status"],
+            "created_at": booking["createdAt"],
+            "last_updated": booking["updatedAt"],
+            "history": all_history
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting booking history: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get booking history"
+        )
+
+
 
 
 # Payment webhook endpoint
