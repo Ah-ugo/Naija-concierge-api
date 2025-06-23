@@ -1531,100 +1531,197 @@ async def login_google(request: Request):
     return await oauth.google.authorize_redirect(request, str(redirect_uri))
 
 
+# @app.get("/auth/google/callback")
+# async def auth_google_callback(request: Request):
+#     try:
+#         token = await oauth.google.authorize_access_token(request)
+#     except Exception as e:
+#         logger.error(f"Google OAuth error: {e}")
+#         raise HTTPException(
+#             status_code=status.HTTP_401_UNAUTHORIZED,
+#             detail="Failed to authenticate with Google"
+#         )
+#
+#     # Get user info from Google
+#     user_info = token.get('userinfo')
+#     if not user_info:
+#         raise HTTPException(
+#             status_code=status.HTTP_400_BAD_REQUEST,
+#             detail="Failed to get user info from Google"
+#         )
+#
+#     email = user_info.get('email')
+#     if not email:
+#         raise HTTPException(
+#             status_code=status.HTTP_400_BAD_REQUEST,
+#             detail="Email not provided by Google"
+#         )
+#
+#     # Check if user exists
+#     user = db.users.find_one({"email": email})
+#
+#     if not user:
+#         # Create new user from Google info
+#         user_data = {
+#             "email": email,
+#             "firstName": user_info.get('given_name', ''),
+#             "lastName": user_info.get('family_name', ''),
+#             "profileImage": user_info.get('picture'),
+#             "role": "user",
+#             "createdAt": datetime.utcnow(),
+#             "updatedAt": datetime.utcnow(),
+#             "hashed_password": ""  # No password for Google users
+#         }
+#
+#         try:
+#             result = db.users.insert_one(user_data)
+#             user_data["_id"] = result.inserted_id
+#             user = user_data
+#         except Exception as e:
+#             logger.error(f"Failed to create user from Google auth: {e}")
+#             raise HTTPException(
+#                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+#                 detail="Failed to create user account"
+#             )
+#
+#     # Convert to UserInDB model
+#     user_in_db = UserInDB(
+#         id=user["_id"],
+#         email=user["email"],
+#         firstName=user.get("firstName", ""),
+#         lastName=user.get("lastName", ""),
+#         phone=user.get("phone"),
+#         address=user.get("address"),
+#         profileImage=user.get("profileImage"),
+#         role=user["role"],
+#         createdAt=user["createdAt"],
+#         updatedAt=user["updatedAt"],
+#         hashed_password=user.get("hashed_password", "")
+#     )
+#
+#     # Create JWT token (same as regular login)
+#     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+#     access_token = create_access_token(
+#         data={"sub": email}, expires_delta=access_token_expires
+#     )
+#
+#     # Prepare user response
+#     user_response = User(
+#         id=str(user_in_db.id),
+#         email=user_in_db.email,
+#         firstName=user_in_db.firstName,
+#         lastName=user_in_db.lastName,
+#         phone=user_in_db.phone,
+#         address=user_in_db.address,
+#         profileImage=user_in_db.profileImage,
+#         role=user_in_db.role,
+#         createdAt=user_in_db.createdAt,
+#         updatedAt=user_in_db.updatedAt
+#     )
+#
+#     return {
+#         "access_token": access_token,
+#         "token_type": "bearer",
+#         "user": user_response
+#     }
+
+
+from urllib.parse import urlencode
+from fastapi.responses import RedirectResponse
+
 @app.get("/auth/google/callback")
 async def auth_google_callback(request: Request):
     try:
         token = await oauth.google.authorize_access_token(request)
     except Exception as e:
         logger.error(f"Google OAuth error: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Failed to authenticate with Google"
+        # Redirect to frontend with error
+        error_params = urlencode({
+            "error": "oauth_failed",
+            "message": "Failed to authenticate with Google"
+        })
+        return RedirectResponse(
+            f"{FRONTEND_URL}/auth/callback?{error_params}"
         )
 
     # Get user info from Google
     user_info = token.get('userinfo')
     if not user_info:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Failed to get user info from Google"
+        error_params = urlencode({
+            "error": "no_user_info",
+            "message": "Failed to get user info from Google"
+        })
+        return RedirectResponse(
+            f"{FRONTEND_URL}/auth/callback?{error_params}"
         )
 
     email = user_info.get('email')
     if not email:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email not provided by Google"
+        error_params = urlencode({
+            "error": "no_email",
+            "message": "Email not provided by Google"
+        })
+        return RedirectResponse(
+            f"{FRONTEND_URL}/auth/callback?{error_params}"
         )
 
-    # Check if user exists
-    user = db.users.find_one({"email": email})
+    try:
+        # Check if user exists
+        user = db.users.find_one({"email": email})
 
-    if not user:
-        # Create new user from Google info
-        user_data = {
-            "email": email,
-            "firstName": user_info.get('given_name', ''),
-            "lastName": user_info.get('family_name', ''),
-            "profileImage": user_info.get('picture'),
-            "role": "user",
-            "createdAt": datetime.utcnow(),
-            "updatedAt": datetime.utcnow(),
-            "hashed_password": ""  # No password for Google users
-        }
+        if not user:
+            # Create new user from Google info
+            user_data = {
+                "email": email,
+                "firstName": user_info.get('given_name', ''),
+                "lastName": user_info.get('family_name', ''),
+                "profileImage": user_info.get('picture'),
+                "role": "user",
+                "createdAt": datetime.utcnow(),
+                "updatedAt": datetime.utcnow(),
+                "hashed_password": ""  # No password for Google users
+            }
 
-        try:
             result = db.users.insert_one(user_data)
             user_data["_id"] = result.inserted_id
             user = user_data
-        except Exception as e:
-            logger.error(f"Failed to create user from Google auth: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to create user account"
-            )
 
-    # Convert to UserInDB model
-    user_in_db = UserInDB(
-        id=user["_id"],
-        email=user["email"],
-        firstName=user.get("firstName", ""),
-        lastName=user.get("lastName", ""),
-        phone=user.get("phone"),
-        address=user.get("address"),
-        profileImage=user.get("profileImage"),
-        role=user["role"],
-        createdAt=user["createdAt"],
-        updatedAt=user["updatedAt"],
-        hashed_password=user.get("hashed_password", "")
-    )
+        # Create JWT token
+        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token = create_access_token(
+            data={"sub": email}, expires_delta=access_token_expires
+        )
 
-    # Create JWT token (same as regular login)
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": email}, expires_delta=access_token_expires
-    )
+        # Prepare success redirect URL with token and user data
+        success_params = urlencode({
+            "token": access_token,
+            "user": json.dumps({
+                "id": str(user["_id"]),
+                "email": user["email"],
+                "firstName": user.get("firstName", ""),
+                "lastName": user.get("lastName", ""),
+                "phone": user.get("phone"),
+                "address": user.get("address"),
+                "profileImage": user.get("profileImage"),
+                "role": user["role"],
+                "createdAt": user["createdAt"].isoformat(),
+                "updatedAt": user["updatedAt"].isoformat()
+            })
+        })
 
-    # Prepare user response
-    user_response = User(
-        id=str(user_in_db.id),
-        email=user_in_db.email,
-        firstName=user_in_db.firstName,
-        lastName=user_in_db.lastName,
-        phone=user_in_db.phone,
-        address=user_in_db.address,
-        profileImage=user_in_db.profileImage,
-        role=user_in_db.role,
-        createdAt=user_in_db.createdAt,
-        updatedAt=user_in_db.updatedAt
-    )
+        return RedirectResponse(
+            f"{FRONTEND_URL}/auth/callback?{success_params}"
+        )
 
-    return {
-        "access_token": access_token,
-        "token_type": "bearer",
-        "user": user_response
-    }
-
+    except Exception as e:
+        logger.error(f"Error processing Google auth: {e}")
+        error_params = urlencode({
+            "error": "processing_error",
+            "message": "Failed to process authentication"
+        })
+        return RedirectResponse(
+            f"{FRONTEND_URL}/auth/callback?{error_params}"
+        )
 
 @app.get("/auth/google/callback/success")
 async def google_auth_success(request: Request, token: str, user: str):
