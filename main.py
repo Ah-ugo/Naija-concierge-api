@@ -1628,13 +1628,221 @@ async def login_google(request: Request):
 
 
 
-@app.get("/auth/google/callback")
+# @app.get("/auth/google/callback")
+# async def auth_google_callback(request: Request):
+#     try:
+#         token = await oauth.google.authorize_access_token(request)
+#     except Exception as e:
+#         logger.error(f"Google OAuth error: {e}")
+#         # Redirect to frontend with error
+#         error_params = urlencode({
+#             "error": "oauth_failed",
+#             "message": "Failed to authenticate with Google"
+#         })
+#         return RedirectResponse(
+#             f"{FRONTEND_URL}/auth/callback?{error_params}"
+#         )
+#
+#     # Get user info from Google
+#     user_info = token.get('userinfo')
+#     if not user_info:
+#         error_params = urlencode({
+#             "error": "no_user_info",
+#             "message": "Failed to get user info from Google"
+#         })
+#         return RedirectResponse(
+#             f"{FRONTEND_URL}/auth/callback?{error_params}"
+#         )
+#
+#     email = user_info.get('email')
+#     if not email:
+#         error_params = urlencode({
+#             "error": "no_email",
+#             "message": "Email not provided by Google"
+#         })
+#         return RedirectResponse(
+#             f"{FRONTEND_URL}/auth/callback?{error_params}"
+#         )
+#
+#     try:
+#         # Check if user exists
+#         user = db.users.find_one({"email": email})
+#
+#         if not user:
+#             # Create new user from Google info
+#             user_data = {
+#                 "email": email,
+#                 "firstName": user_info.get('given_name', ''),
+#                 "lastName": user_info.get('family_name', ''),
+#                 "profileImage": user_info.get('picture'),
+#                 "role": "user",
+#                 "createdAt": datetime.utcnow(),
+#                 "updatedAt": datetime.utcnow(),
+#                 "hashed_password": ""  # No password for Google users
+#             }
+#
+#             result = db.users.insert_one(user_data)
+#             user_data["_id"] = result.inserted_id
+#             user = user_data
+#
+#         # Create JWT token
+#         access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+#         access_token = create_access_token(
+#             data={"sub": email}, expires_delta=access_token_expires
+#         )
+#
+#         # Prepare success redirect URL with token and user data
+#         success_params = urlencode({
+#             "token": access_token,
+#             "user": json.dumps({
+#                 "id": str(user["_id"]),
+#                 "email": user["email"],
+#                 "firstName": user.get("firstName", ""),
+#                 "lastName": user.get("lastName", ""),
+#                 "phone": user.get("phone"),
+#                 "address": user.get("address"),
+#                 "profileImage": user.get("profileImage"),
+#                 "role": user["role"],
+#                 "createdAt": user["createdAt"].isoformat(),
+#                 "updatedAt": user["updatedAt"].isoformat()
+#             })
+#         })
+#
+#         return RedirectResponse(
+#             f"{FRONTEND_URL}/auth/callback?{success_params}"
+#         )
+#
+#     except Exception as e:
+#         logger.error(f"Error processing Google auth: {e}")
+#         error_params = urlencode({
+#             "error": "processing_error",
+#             "message": "Failed to process authentication"
+#         })
+#         return RedirectResponse(
+#             f"{FRONTEND_URL}/auth/callback?{error_params}"
+#         )
+#
+# @app.get("/auth/google/callback/success")
+# async def google_auth_success(request: Request, token: str, user: str):
+#     user_data = json.loads(user)
+#     return JSONResponse({
+#         "type": "google-auth-success",
+#         "token": token,
+#         "user": user_data
+#     })
+#
+# @app.get("/auth/google/callback/error")
+# async def google_auth_error(request: Request, message: str):
+#     return JSONResponse({
+#         "type": "google-auth-error",
+#         "message": message
+#     })
+#
+#
+# @app.post("/auth/register/google", response_model=Token)
+# async def register_with_google(google_user: GoogleUserCreate):
+#     """
+#     Register a new user using Google authentication.
+#
+#     Requires a valid Google ID token obtained from the frontend Google Sign-In flow.
+#     """
+#     # Validate Google token
+#     try:
+#         user_info = await validate_google_token(google_user.google_token)
+#     except Exception as e:
+#         logger.error(f"Google token validation error: {e}")
+#         raise HTTPException(
+#             status_code=status.HTTP_401_UNAUTHORIZED,
+#             detail="Invalid Google token"
+#         )
+#
+#     # Check required fields
+#     if not user_info.get("email"):
+#         raise HTTPException(
+#             status_code=status.HTTP_400_BAD_REQUEST,
+#             detail="Email not provided by Google"
+#         )
+#
+#     email = user_info["email"]
+#
+#     # Check if user already exists
+#     if db.users.find_one({"email": email}):
+#         raise HTTPException(
+#             status_code=status.HTTP_400_BAD_REQUEST,
+#             detail="Email already registered"
+#         )
+#
+#     # Create new user
+#     user_data = create_user_from_google(user_info)
+#
+#     try:
+#         result = db.users.insert_one(user_data)
+#         user_data["_id"] = result.inserted_id
+#     except Exception as e:
+#         logger.error(f"Database insertion error: {e}")
+#         raise HTTPException(
+#             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+#             detail="Failed to create user"
+#         )
+#
+#     # Convert to UserInDB model
+#     user_in_db = UserInDB(**user_data)
+#
+#     # Generate access token
+#     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+#     access_token = create_access_token(
+#         data={"sub": email}, expires_delta=access_token_expires
+#     )
+#
+#     # Prepare user response
+#     user_response = User(
+#         id=str(user_in_db.id),
+#         email=user_in_db.email,
+#         firstName=user_in_db.firstName,
+#         lastName=user_in_db.lastName,
+#         phone=user_in_db.phone,
+#         address=user_in_db.address,
+#         profileImage=user_in_db.profileImage,
+#         role=user_in_db.role,
+#         createdAt=user_in_db.createdAt,
+#         updatedAt=user_in_db.updatedAt
+#     )
+#
+#     # Send welcome email
+#     welcome_html = f"""
+#     <html>
+#         <body>
+#             <h1>Welcome to Sorted Concierge, {user_in_db.firstName}!</h1>
+#             <p>Thank you for registering with us using your Google account.</p>
+#             <p>We're excited to help you experience Luxury like never before.</p>
+#             <p>Best regards,<br>The Sorted Concierge Team</p>
+#         </body>
+#     </html>
+#     """
+#     send_email(user_in_db.email, "Welcome to Sorted Concierge", welcome_html)
+#
+#     return {
+#         "access_token": access_token,
+#         "token_type": "bearer",
+#         "user": user_response
+#     }
+
+
+@router.get("/auth/google/login")
+async def login_via_google(request: Request):
+    """
+    Initiates the Google OAuth flow
+    """
+    redirect_uri = f"{request.base_url}auth/google/callback"
+    return await oauth.google.authorize_redirect(request, redirect_uri)
+
+
+@router.get("/auth/google/callback")
 async def auth_google_callback(request: Request):
     try:
         token = await oauth.google.authorize_access_token(request)
     except Exception as e:
         logger.error(f"Google OAuth error: {e}")
-        # Redirect to frontend with error
         error_params = urlencode({
             "error": "oauth_failed",
             "message": "Failed to authenticate with Google"
@@ -1643,7 +1851,6 @@ async def auth_google_callback(request: Request):
             f"{FRONTEND_URL}/auth/callback?{error_params}"
         )
 
-    # Get user info from Google
     user_info = token.get('userinfo')
     if not user_info:
         error_params = urlencode({
@@ -1665,11 +1872,9 @@ async def auth_google_callback(request: Request):
         )
 
     try:
-        # Check if user exists
         user = db.users.find_one({"email": email})
 
         if not user:
-            # Create new user from Google info
             user_data = {
                 "email": email,
                 "firstName": user_info.get('given_name', ''),
@@ -1678,154 +1883,120 @@ async def auth_google_callback(request: Request):
                 "role": "user",
                 "createdAt": datetime.utcnow(),
                 "updatedAt": datetime.utcnow(),
-                "hashed_password": ""  # No password for Google users
+                "hashed_password": ""
             }
-
             result = db.users.insert_one(user_data)
             user_data["_id"] = result.inserted_id
             user = user_data
 
-        # Create JWT token
         access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
         access_token = create_access_token(
             data={"sub": email}, expires_delta=access_token_expires
         )
 
-        # Prepare success redirect URL with token and user data
-        success_params = urlencode({
-            "token": access_token,
-            "user": json.dumps({
-                "id": str(user["_id"]),
-                "email": user["email"],
-                "firstName": user.get("firstName", ""),
-                "lastName": user.get("lastName", ""),
-                "phone": user.get("phone"),
-                "address": user.get("address"),
-                "profileImage": user.get("profileImage"),
-                "role": user["role"],
-                "createdAt": user["createdAt"].isoformat(),
-                "updatedAt": user["updatedAt"].isoformat()
-            })
-        })
-
-        return RedirectResponse(
-            f"{FRONTEND_URL}/auth/callback?{success_params}"
-        )
+        # Prepare the response to send back to the popup window
+        response_html = f"""
+        <html>
+            <body>
+                <script>
+                    window.opener.postMessage({{
+                        type: "google-auth-success",
+                        token: "{access_token}",
+                        user: {json.dumps({
+            "id": str(user["_id"]),
+            "email": user["email"],
+            "firstName": user.get("firstName", ""),
+            "lastName": user.get("lastName", ""),
+            "phone": user.get("phone", ""),
+            "profileImage": user.get("profileImage", ""),
+            "role": user["role"]
+        })}
+                    }}, "{FRONTEND_URL}");
+                    window.close();
+                </script>
+            </body>
+        </html>
+        """
+        return HTMLResponse(response_html)
 
     except Exception as e:
         logger.error(f"Error processing Google auth: {e}")
-        error_params = urlencode({
-            "error": "processing_error",
-            "message": "Failed to process authentication"
-        })
-        return RedirectResponse(
-            f"{FRONTEND_URL}/auth/callback?{error_params}"
-        )
-
-@app.get("/auth/google/callback/success")
-async def google_auth_success(request: Request, token: str, user: str):
-    user_data = json.loads(user)
-    return JSONResponse({
-        "type": "google-auth-success",
-        "token": token,
-        "user": user_data
-    })
-
-@app.get("/auth/google/callback/error")
-async def google_auth_error(request: Request, message: str):
-    return JSONResponse({
-        "type": "google-auth-error",
-        "message": message
-    })
+        response_html = f"""
+        <html>
+            <body>
+                <script>
+                    window.opener.postMessage({{
+                        type: "google-auth-error",
+                        message: "Failed to process authentication"
+                    }}, "{FRONTEND_URL}");
+                    window.close();
+                </script>
+            </body>
+        </html>
+        """
+        return HTMLResponse(response_html)
 
 
-@app.post("/auth/register/google", response_model=Token)
+@router.post("/auth/register/google")
 async def register_with_google(google_user: GoogleUserCreate):
-    """
-    Register a new user using Google authentication.
-
-    Requires a valid Google ID token obtained from the frontend Google Sign-In flow.
-    """
-    # Validate Google token
     try:
+        # Validate Google token
         user_info = await validate_google_token(google_user.google_token)
-    except Exception as e:
-        logger.error(f"Google token validation error: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid Google token"
-        )
+        if not user_info.get("email"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email not provided by Google"
+            )
 
-    # Check required fields
-    if not user_info.get("email"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email not provided by Google"
-        )
+        email = user_info["email"]
 
-    email = user_info["email"]
+        # Check if user exists
+        if db.users.find_one({"email": email}):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email already registered"
+            )
 
-    # Check if user already exists
-    if db.users.find_one({"email": email}):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email already registered"
-        )
+        # Create new user
+        user_data = {
+            "email": email,
+            "firstName": user_info.get('given_name', ''),
+            "lastName": user_info.get('family_name', ''),
+            "profileImage": user_info.get('picture'),
+            "role": "user",
+            "createdAt": datetime.utcnow(),
+            "updatedAt": datetime.utcnow(),
+            "hashed_password": ""
+        }
 
-    # Create new user
-    user_data = create_user_from_google(user_info)
-
-    try:
         result = db.users.insert_one(user_data)
         user_data["_id"] = result.inserted_id
-    except Exception as e:
-        logger.error(f"Database insertion error: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to create user"
+
+        # Generate token
+        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token = create_access_token(
+            data={"sub": email}, expires_delta=access_token_expires
         )
 
-    # Convert to UserInDB model
-    user_in_db = UserInDB(**user_data)
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "user": {
+                "id": str(user_data["_id"]),
+                "email": user_data["email"],
+                "firstName": user_data["firstName"],
+                "lastName": user_data["lastName"],
+                "profileImage": user_data["profileImage"],
+                "role": user_data["role"]
+            }
+        }
 
-    # Generate access token
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": email}, expires_delta=access_token_expires
-    )
-
-    # Prepare user response
-    user_response = User(
-        id=str(user_in_db.id),
-        email=user_in_db.email,
-        firstName=user_in_db.firstName,
-        lastName=user_in_db.lastName,
-        phone=user_in_db.phone,
-        address=user_in_db.address,
-        profileImage=user_in_db.profileImage,
-        role=user_in_db.role,
-        createdAt=user_in_db.createdAt,
-        updatedAt=user_in_db.updatedAt
-    )
-
-    # Send welcome email
-    welcome_html = f"""
-    <html>
-        <body>
-            <h1>Welcome to Sorted Concierge, {user_in_db.firstName}!</h1>
-            <p>Thank you for registering with us using your Google account.</p>
-            <p>We're excited to help you experience Luxury like never before.</p>
-            <p>Best regards,<br>The Sorted Concierge Team</p>
-        </body>
-    </html>
-    """
-    send_email(user_in_db.email, "Welcome to Sorted Concierge", welcome_html)
-
-    return {
-        "access_token": access_token,
-        "token_type": "bearer",
-        "user": user_response
-    }
+    except Exception as e:
+        logger.error(f"Google registration error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to register with Google"
+        )
 
 
 @app.get("/auth/me", response_model=User)
