@@ -1837,6 +1837,7 @@ async def login_via_google(request: Request):
     return await oauth.google.authorize_redirect(request, redirect_uri)
 
 
+
 @app.get("/auth/google/callback")
 async def auth_google_callback(request: Request):
     try:
