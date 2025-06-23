@@ -1833,7 +1833,7 @@ async def login_via_google(request: Request):
     """
     Initiates the Google OAuth flow
     """
-    redirect_uri = f"{request.base_url}auth/google/callback"
+    redirect_uri = f"https://naija-concierge-api.onrender.com/auth/google/callback"
     return await oauth.google.authorize_redirect(request, redirect_uri)
 
 
