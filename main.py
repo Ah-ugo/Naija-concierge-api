@@ -1626,6 +1626,23 @@ async def auth_google_callback(request: Request):
     }
 
 
+@app.get("/auth/google/callback/success")
+async def google_auth_success(request: Request, token: str, user: str):
+    user_data = json.loads(user)
+    return JSONResponse({
+        "type": "google-auth-success",
+        "token": token,
+        "user": user_data
+    })
+
+@app.get("/auth/google/callback/error")
+async def google_auth_error(request: Request, message: str):
+    return JSONResponse({
+        "type": "google-auth-error",
+        "message": message
+    })
+
+
 @app.post("/auth/register/google", response_model=Token)
 async def register_with_google(google_user: GoogleUserCreate):
     """
