@@ -1828,54 +1828,57 @@ async def login_google(request: Request):
 #     }
 
 
-
-
-
 @router.get("/auth/google/login")
-async def login_via_google(request: Request, redirect_uri: str = None):
+async def login_via_google(request: Request, redirect_uri: str, register: bool = False):
     """
-    Initiates the Google OAuth flow
+    Initiates Google OAuth flow with proper redirect handling
     """
-    if not redirect_uri:
-        redirect_uri = f"{request.base_url}auth/google/callback"
+    # Validate redirect_uri for security
+    allowed_domains = ["http://localhost:3000", "https://sorted-concierge.vercel.app", "https://thesortedconcierge.com/"]
+    if not any(redirect_uri.startswith(domain) for domain in allowed_domains):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid redirect URI"
+        )
 
-    return await oauth.google.authorize_redirect(request, redirect_uri)
+
+    request.session["google_register"] = register
+
+
+    return await oauth.google.authorize_redirect(
+        request,
+        redirect_uri + "?register=true" if register else redirect_uri
+    )
 
 
 @router.get("/auth/google/callback")
 async def auth_google_callback(request: Request):
     try:
+        # Get the register flag from session
+        register = request.session.get("google_register", False)
+
+        # Complete the OAuth flow
         token = await oauth.google.authorize_access_token(request)
-    except Exception as e:
-        error_params = urlencode({
-            "error": "Failed to authenticate with Google"
-        })
-        return RedirectResponse(
-            f"{request.query_params.get('redirect_uri', FRONTEND_URL)}?{error_params}"
-        )
+        user_info = token.get('userinfo')
 
-    user_info = token.get('userinfo')
-    if not user_info:
-        error_params = urlencode({
-            "error": "Failed to get user info from Google"
-        })
-        return RedirectResponse(
-            f"{request.query_params.get('redirect_uri', FRONTEND_URL)}?{error_params}"
-        )
+        if not user_info or not user_info.get('email'):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Failed to get user info from Google"
+            )
 
-    email = user_info.get('email')
-    if not email:
-        error_params = urlencode({
-            "error": "Email not provided by Google"
-        })
-        return RedirectResponse(
-            f"{request.query_params.get('redirect_uri', FRONTEND_URL)}?{error_params}"
-        )
+        email = user_info['email']
 
-    try:
+        # Check if user exists or create new
         user = db.users.find_one({"email": email})
 
         if not user:
+            if not register:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Account not found. Please register first."
+                )
+
             user_data = {
                 "email": email,
                 "firstName": user_info.get('given_name', ''),
@@ -1890,36 +1893,40 @@ async def auth_google_callback(request: Request):
             user_data["_id"] = result.inserted_id
             user = user_data
 
-        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        # Generate JWT token
+        access_token_expires = timedelta(minutes=30)
         access_token = create_access_token(
             data={"sub": email}, expires_delta=access_token_expires
         )
 
-        success_params = urlencode({
+        # Prepare success response
+        redirect_uri = request.query_params.get('redirect_uri', FRONTEND_URL)
+        user_data = {
+            "id": str(user["_id"]),
+            "email": user["email"],
+            "firstName": user.get("firstName", ""),
+            "lastName": user.get("lastName", ""),
+            "profileImage": user.get("profileImage", ""),
+            "role": user["role"]
+        }
+
+        params = {
             "token": access_token,
-            "user": json.dumps({
-                "id": str(user["_id"]),
-                "email": user["email"],
-                "firstName": user.get("firstName", ""),
-                "lastName": user.get("lastName", ""),
-                "phone": user.get("phone", ""),
-                "profileImage": user.get("profileImage", ""),
-                "role": user["role"]
-            })
-        })
+            "user": json.dumps(user_data),
+            "register": "true" if register else "false"
+        }
 
         return RedirectResponse(
-            f"{request.query_params.get('redirect_uri', FRONTEND_URL)}?{success_params}"
+            f"{redirect_uri}?{urlencode(params)}"
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
-        error_params = urlencode({
-            "error": "Failed to process authentication"
-        })
+        redirect_uri = request.query_params.get('redirect_uri', FRONTEND_URL)
         return RedirectResponse(
-            f"{request.query_params.get('redirect_uri', FRONTEND_URL)}?{error_params}"
+            f"{redirect_uri}?error={str(e)}"
         )
-
 
 
 @app.post("/auth/register/google")
