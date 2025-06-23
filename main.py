@@ -1834,9 +1834,18 @@ async def login_via_google(request: Request, redirect_uri: str, register: bool =
     Initiates Google OAuth flow with proper redirect handling
     """
     # Validate redirect_uri for security
-    allowed_domains = ["http://localhost:3000", "https://sorted-concierge.vercel.app", "https://thesortedconcierge.com"]
+    allowed_domains = [
+        "http://localhost:3000",
+        "https://sorted-concierge.vercel.app",
+        "https://naija-concierge-api.onrender.com",
+        "https://thesortedconcierge.com"
+    ]
+
     if not any(redirect_uri.startswith(domain) for domain in allowed_domains):
-        raise HTTPException(status_code=400, detail="Invalid redirect URI")
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid redirect URI"
+        )
 
     # Store register flag in session
     request.session["google_register"] = register
@@ -1844,23 +1853,25 @@ async def login_via_google(request: Request, redirect_uri: str, register: bool =
     # Initiate Google OAuth flow
     return await oauth.google.authorize_redirect(
         request,
-        f"{redirect_uri}?register=true" if register else redirect_uri
+        redirect_uri
     )
 
 
 @app.get("/auth/google/callback")
 async def auth_google_callback(request: Request):
     try:
-        # Get register flag from session
+        # Get the register flag from session
         register = request.session.get("google_register", False)
         redirect_uri = request.query_params.get('redirect_uri', FRONTEND_URL)
 
-        # Complete OAuth flow
+        # Complete the OAuth flow
         token = await oauth.google.authorize_access_token(request)
         user_info = token.get('userinfo')
 
         if not user_info or not user_info.get('email'):
-            return RedirectResponse(f"{redirect_uri}?error=Failed to get user info from Google")
+            return RedirectResponse(
+                f"{redirect_uri}?error={quote('Failed to get user info from Google')}"
+            )
 
         email = user_info['email']
 
@@ -1869,7 +1880,9 @@ async def auth_google_callback(request: Request):
 
         if not user:
             if not register:
-                return RedirectResponse(f"{redirect_uri}?error=Account not found. Please register first.")
+                return RedirectResponse(
+                    f"{redirect_uri}?error={quote('Account not found. Please register first.')}"
+                )
 
             user_data = {
                 "email": email,
@@ -1888,7 +1901,7 @@ async def auth_google_callback(request: Request):
         # Generate JWT token
         access_token = create_access_token(data={"sub": email})
 
-        # Prepare user data for redirect
+        # Prepare success response
         user_response = {
             "id": str(user["_id"]),
             "email": user["email"],
@@ -1904,11 +1917,15 @@ async def auth_google_callback(request: Request):
             "register": "true" if register else "false"
         }
 
-        return RedirectResponse(f"{redirect_uri}?{urlencode(params)}")
+        return RedirectResponse(
+            f"{redirect_uri}?{urlencode(params)}"
+        )
 
     except Exception as e:
         redirect_uri = request.query_params.get('redirect_uri', FRONTEND_URL)
-        return RedirectResponse(f"{redirect_uri}?error={str(e)}")
+        return RedirectResponse(
+            f"{redirect_uri}?error={quote(str(e))}"
+        )
 
 
 @app.post("/auth/register/google")
