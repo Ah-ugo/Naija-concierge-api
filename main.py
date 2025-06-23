@@ -1626,8 +1626,7 @@ async def login_google(request: Request):
 #     }
 
 
-from urllib.parse import urlencode
-from fastapi.responses import RedirectResponse
+
 
 @app.get("/auth/google/callback")
 async def auth_google_callback(request: Request):
