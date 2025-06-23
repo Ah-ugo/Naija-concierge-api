@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, status, Request, File, UploadFile, Form, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, EmailStr, Field, GetJsonSchemaHandler, BeforeValidator, ValidationError, field_validator
 from pydantic.json_schema import JsonSchemaValue
