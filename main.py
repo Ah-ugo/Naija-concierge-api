@@ -1828,44 +1828,39 @@ async def login_google(request: Request):
 #     }
 
 
-@router.get("/auth/google/login")
+@app.get("/auth/google/login")
 async def login_via_google(request: Request, redirect_uri: str, register: bool = False):
     """
     Initiates Google OAuth flow with proper redirect handling
     """
     # Validate redirect_uri for security
-    allowed_domains = ["http://localhost:3000", "https://sorted-concierge.vercel.app", "https://thesortedconcierge.com/"]
+    allowed_domains = ["http://localhost:3000", "https://sorted-concierge.vercel.app", "https://thesortedconcierge.com"]
     if not any(redirect_uri.startswith(domain) for domain in allowed_domains):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid redirect URI"
-        )
+        raise HTTPException(status_code=400, detail="Invalid redirect URI")
 
-
+    # Store register flag in session
     request.session["google_register"] = register
 
-
+    # Initiate Google OAuth flow
     return await oauth.google.authorize_redirect(
         request,
-        redirect_uri + "?register=true" if register else redirect_uri
+        f"{redirect_uri}?register=true" if register else redirect_uri
     )
 
 
 @router.get("/auth/google/callback")
 async def auth_google_callback(request: Request):
     try:
-        # Get the register flag from session
+        # Get register flag from session
         register = request.session.get("google_register", False)
+        redirect_uri = request.query_params.get('redirect_uri', FRONTEND_URL)
 
-        # Complete the OAuth flow
+        # Complete OAuth flow
         token = await oauth.google.authorize_access_token(request)
         user_info = token.get('userinfo')
 
         if not user_info or not user_info.get('email'):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Failed to get user info from Google"
-            )
+            return RedirectResponse(f"{redirect_uri}?error=Failed to get user info from Google")
 
         email = user_info['email']
 
@@ -1874,10 +1869,7 @@ async def auth_google_callback(request: Request):
 
         if not user:
             if not register:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Account not found. Please register first."
-                )
+                return RedirectResponse(f"{redirect_uri}?error=Account not found. Please register first.")
 
             user_data = {
                 "email": email,
@@ -1894,14 +1886,10 @@ async def auth_google_callback(request: Request):
             user = user_data
 
         # Generate JWT token
-        access_token_expires = timedelta(minutes=30)
-        access_token = create_access_token(
-            data={"sub": email}, expires_delta=access_token_expires
-        )
+        access_token = create_access_token(data={"sub": email})
 
-        # Prepare success response
-        redirect_uri = request.query_params.get('redirect_uri', FRONTEND_URL)
-        user_data = {
+        # Prepare user data for redirect
+        user_response = {
             "id": str(user["_id"]),
             "email": user["email"],
             "firstName": user.get("firstName", ""),
@@ -1912,21 +1900,15 @@ async def auth_google_callback(request: Request):
 
         params = {
             "token": access_token,
-            "user": json.dumps(user_data),
+            "user": json.dumps(user_response),
             "register": "true" if register else "false"
         }
 
-        return RedirectResponse(
-            f"{redirect_uri}?{urlencode(params)}"
-        )
+        return RedirectResponse(f"{redirect_uri}?{urlencode(params)}")
 
-    except HTTPException:
-        raise
     except Exception as e:
         redirect_uri = request.query_params.get('redirect_uri', FRONTEND_URL)
-        return RedirectResponse(
-            f"{redirect_uri}?error={str(e)}"
-        )
+        return RedirectResponse(f"{redirect_uri}?error={str(e)}")
 
 
 @app.post("/auth/register/google")
