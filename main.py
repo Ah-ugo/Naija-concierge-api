@@ -1828,48 +1828,48 @@ async def login_google(request: Request):
 #     }
 
 
-@app.get("/auth/google/login")
-async def login_via_google(request: Request):
+
+
+
+@router.get("/auth/google/login")
+async def login_via_google(request: Request, redirect_uri: str = None):
     """
     Initiates the Google OAuth flow
     """
-    redirect_uri = f"https://naija-concierge-api.onrender.com/auth/google/callback"
+    if not redirect_uri:
+        redirect_uri = f"{request.base_url}auth/google/callback"
+
     return await oauth.google.authorize_redirect(request, redirect_uri)
 
 
-
-@app.get("/auth/google/callback")
+@router.get("/auth/google/callback")
 async def auth_google_callback(request: Request):
     try:
         token = await oauth.google.authorize_access_token(request)
     except Exception as e:
-        logger.error(f"Google OAuth error: {e}")
         error_params = urlencode({
-            "error": "oauth_failed",
-            "message": "Failed to authenticate with Google"
+            "error": "Failed to authenticate with Google"
         })
         return RedirectResponse(
-            f"{FRONTEND_URL}/auth/callback?{error_params}"
+            f"{request.query_params.get('redirect_uri', FRONTEND_URL)}?{error_params}"
         )
 
     user_info = token.get('userinfo')
     if not user_info:
         error_params = urlencode({
-            "error": "no_user_info",
-            "message": "Failed to get user info from Google"
+            "error": "Failed to get user info from Google"
         })
         return RedirectResponse(
-            f"{FRONTEND_URL}/auth/callback?{error_params}"
+            f"{request.query_params.get('redirect_uri', FRONTEND_URL)}?{error_params}"
         )
 
     email = user_info.get('email')
     if not email:
         error_params = urlencode({
-            "error": "no_email",
-            "message": "Email not provided by Google"
+            "error": "Email not provided by Google"
         })
         return RedirectResponse(
-            f"{FRONTEND_URL}/auth/callback?{error_params}"
+            f"{request.query_params.get('redirect_uri', FRONTEND_URL)}?{error_params}"
         )
 
     try:
@@ -1895,47 +1895,31 @@ async def auth_google_callback(request: Request):
             data={"sub": email}, expires_delta=access_token_expires
         )
 
-        # Prepare the response to send back to the popup window
-        response_html = f"""
-        <html>
-            <body>
-                <script>
-                    window.opener.postMessage({{
-                        type: "google-auth-success",
-                        token: "{access_token}",
-                        user: {json.dumps({
-            "id": str(user["_id"]),
-            "email": user["email"],
-            "firstName": user.get("firstName", ""),
-            "lastName": user.get("lastName", ""),
-            "phone": user.get("phone", ""),
-            "profileImage": user.get("profileImage", ""),
-            "role": user["role"]
-        })}
-                    }}, "{FRONTEND_URL}");
-                    window.close();
-                </script>
-            </body>
-        </html>
-        """
-        return HTMLResponse(response_html)
+        success_params = urlencode({
+            "token": access_token,
+            "user": json.dumps({
+                "id": str(user["_id"]),
+                "email": user["email"],
+                "firstName": user.get("firstName", ""),
+                "lastName": user.get("lastName", ""),
+                "phone": user.get("phone", ""),
+                "profileImage": user.get("profileImage", ""),
+                "role": user["role"]
+            })
+        })
+
+        return RedirectResponse(
+            f"{request.query_params.get('redirect_uri', FRONTEND_URL)}?{success_params}"
+        )
 
     except Exception as e:
-        logger.error(f"Error processing Google auth: {e}")
-        response_html = f"""
-        <html>
-            <body>
-                <script>
-                    window.opener.postMessage({{
-                        type: "google-auth-error",
-                        message: "Failed to process authentication"
-                    }}, "{FRONTEND_URL}");
-                    window.close();
-                </script>
-            </body>
-        </html>
-        """
-        return HTMLResponse(response_html)
+        error_params = urlencode({
+            "error": "Failed to process authentication"
+        })
+        return RedirectResponse(
+            f"{request.query_params.get('redirect_uri', FRONTEND_URL)}?{error_params}"
+        )
+
 
 
 @app.post("/auth/register/google")

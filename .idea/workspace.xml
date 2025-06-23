@@ -4,7 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="3e0dd151-8051-4749-8783-8535006b41f5" name="Changes" comment="google auth implementation1">
+    <list default="true" id="3e0dd151-8051-4749-8783-8535006b41f5" name="Changes" comment="google auth implementation2">
       <change afterPath="$PROJECT_DIR$/new.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
@@ -349,7 +349,15 @@
       <option name="project" value="LOCAL" />
       <updated>1750716128121</updated>
     </task>
-    <option name="localTasksCounter" value="34" />
+    <task id="LOCAL-00034" summary="google auth implementation2">
+      <option name="closed" value="true" />
+      <created>1750716448145</created>
+      <option name="number" value="00034" />
+      <option name="presentableId" value="LOCAL-00034" />
+      <option name="project" value="LOCAL" />
+      <updated>1750716448145</updated>
+    </task>
+    <option name="localTasksCounter" value="35" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -365,6 +373,7 @@
     <MESSAGE value="auth fix" />
     <MESSAGE value="google auth implementation" />
     <MESSAGE value="google auth implementation1" />
-    <option name="LAST_COMMIT_MESSAGE" value="google auth implementation1" />
+    <MESSAGE value="google auth implementation2" />
+    <option name="LAST_COMMIT_MESSAGE" value="google auth implementation2" />
   </component>
 </project>
