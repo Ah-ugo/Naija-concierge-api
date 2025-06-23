@@ -1848,7 +1848,7 @@ async def login_via_google(request: Request, redirect_uri: str, register: bool =
     )
 
 
-@router.get("/auth/google/callback")
+@app.get("/auth/google/callback")
 async def auth_google_callback(request: Request):
     try:
         # Get register flag from session
