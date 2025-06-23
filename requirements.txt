@@ -63,3 +63,4 @@ python-jose[cryptography]
 passlib[bcrypt]
 reportlab
 authlib
+itsdangerous
