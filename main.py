@@ -30,6 +30,10 @@ import json
 import hmac
 import hashlib
 import httpx
+from authlib.integrations.starlette_client import OAuth
+from starlette.config import Config
+from starlette.middleware.sessions import SessionMiddleware
+from starlette.responses import RedirectResponse
 
 # Configure logging
 logging.basicConfig(
@@ -98,6 +102,20 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 # OAuth2 scheme
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token")
 
+
+oauth = OAuth()
+
+# Configure Google OAuth
+oauth.register(
+    name='google',
+    client_id=os.getenv('GOOGLE_CLIENT_ID'),
+    client_secret=os.getenv('GOOGLE_CLIENT_SECRET'),
+    server_metadata_url='https://accounts.google.com/.well-known/openid-configuration',
+    client_kwargs={
+        'scope': 'openid email profile'
+    }
+)
+
 app = FastAPI(title="Naija Concierge API")
 
 # CORS middleware
@@ -107,8 +125,14 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+
 )
 
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=SECRET_KEY,
+    session_cookie="session"
+)
 
 class PyObjectId(ObjectId):
     @classmethod
@@ -188,7 +212,7 @@ class UserInDB(UserBase):
     role: str = "user"
     createdAt: datetime = Field(default_factory=datetime.utcnow)
     updatedAt: datetime = Field(default_factory=datetime.utcnow)
-    hashed_password: str
+    hashed_password: Optional[str] = None
 
     class Config:
         populate_by_name = True
@@ -223,6 +247,17 @@ class Token(BaseModel):
 class TokenData(BaseModel):
     email: Optional[str] = None
     role: Optional[str] = None
+
+
+
+class GoogleUserCreate(BaseModel):
+    google_token: str
+
+class GoogleUserInfo(BaseModel):
+    email: EmailStr
+    firstName: str
+    lastName: str
+    profileImage: Optional[str] = None
 
 
 # Service Category Models
@@ -878,6 +913,13 @@ def authenticate_user(email: str, password: str):
     user = get_user(email)
     if not user:
         return False
+
+    if not user.hashed_password:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Please sign in with Google"
+        )
+
     if not verify_password(password, user.hashed_password):
         return False
     return user
@@ -892,6 +934,36 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
+
+
+async def validate_google_token(token: str) -> dict:
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                "https://www.googleapis.com/oauth2/v3/tokeninfo",
+                params={"id_token": token}
+            )
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Google token validation failed: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid Google token"
+        )
+
+def create_user_from_google(google_user: dict) -> dict:
+    """Create user dictionary from Google user info"""
+    return {
+        "email": google_user["email"],
+        "firstName": google_user.get("given_name", ""),
+        "lastName": google_user.get("family_name", ""),
+        "profileImage": google_user.get("picture"),
+        "role": "user",
+        "createdAt": datetime.utcnow(),
+        "updatedAt": datetime.utcnow(),
+        "hashed_password": None  # No password for Google users
+    }
 
 
 async def get_current_user(token: str = Depends(oauth2_scheme)):
@@ -1401,11 +1473,25 @@ async def register(user: UserCreate):
     }
 
 
-
 @app.post("/auth/token", response_model=Token)
 async def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    user = authenticate_user(form_data.username, form_data.password)
+    user = get_user(form_data.username)
     if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # Handle Google-authenticated users trying to use password login
+    if not user.hashed_password:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Account was created with Google. Please sign in with Google.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    if not verify_password(form_data.password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
@@ -1429,6 +1515,198 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
         createdAt=user.createdAt,
         updatedAt=user.updatedAt
     )
+
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": user_response
+    }
+
+
+
+@app.get("/auth/google/login")
+async def login_google(request: Request):
+    # Absolute redirect URL for Google OAuth
+    redirect_uri = request.url_for('auth_google_callback')
+    return await oauth.google.authorize_redirect(request, str(redirect_uri))
+
+
+@app.get("/auth/google/callback")
+async def auth_google_callback(request: Request):
+    try:
+        token = await oauth.google.authorize_access_token(request)
+    except Exception as e:
+        logger.error(f"Google OAuth error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Failed to authenticate with Google"
+        )
+
+    # Get user info from Google
+    user_info = token.get('userinfo')
+    if not user_info:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to get user info from Google"
+        )
+
+    email = user_info.get('email')
+    if not email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email not provided by Google"
+        )
+
+    # Check if user exists
+    user = db.users.find_one({"email": email})
+
+    if not user:
+        # Create new user from Google info
+        user_data = {
+            "email": email,
+            "firstName": user_info.get('given_name', ''),
+            "lastName": user_info.get('family_name', ''),
+            "profileImage": user_info.get('picture'),
+            "role": "user",
+            "createdAt": datetime.utcnow(),
+            "updatedAt": datetime.utcnow(),
+            "hashed_password": ""  # No password for Google users
+        }
+
+        try:
+            result = db.users.insert_one(user_data)
+            user_data["_id"] = result.inserted_id
+            user = user_data
+        except Exception as e:
+            logger.error(f"Failed to create user from Google auth: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to create user account"
+            )
+
+    # Convert to UserInDB model
+    user_in_db = UserInDB(
+        id=user["_id"],
+        email=user["email"],
+        firstName=user.get("firstName", ""),
+        lastName=user.get("lastName", ""),
+        phone=user.get("phone"),
+        address=user.get("address"),
+        profileImage=user.get("profileImage"),
+        role=user["role"],
+        createdAt=user["createdAt"],
+        updatedAt=user["updatedAt"],
+        hashed_password=user.get("hashed_password", "")
+    )
+
+    # Create JWT token (same as regular login)
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": email}, expires_delta=access_token_expires
+    )
+
+    # Prepare user response
+    user_response = User(
+        id=str(user_in_db.id),
+        email=user_in_db.email,
+        firstName=user_in_db.firstName,
+        lastName=user_in_db.lastName,
+        phone=user_in_db.phone,
+        address=user_in_db.address,
+        profileImage=user_in_db.profileImage,
+        role=user_in_db.role,
+        createdAt=user_in_db.createdAt,
+        updatedAt=user_in_db.updatedAt
+    )
+
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": user_response
+    }
+
+
+@app.post("/auth/register/google", response_model=Token)
+async def register_with_google(google_user: GoogleUserCreate):
+    """
+    Register a new user using Google authentication.
+
+    Requires a valid Google ID token obtained from the frontend Google Sign-In flow.
+    """
+    # Validate Google token
+    try:
+        user_info = await validate_google_token(google_user.google_token)
+    except Exception as e:
+        logger.error(f"Google token validation error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid Google token"
+        )
+
+    # Check required fields
+    if not user_info.get("email"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email not provided by Google"
+        )
+
+    email = user_info["email"]
+
+    # Check if user already exists
+    if db.users.find_one({"email": email}):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered"
+        )
+
+    # Create new user
+    user_data = create_user_from_google(user_info)
+
+    try:
+        result = db.users.insert_one(user_data)
+        user_data["_id"] = result.inserted_id
+    except Exception as e:
+        logger.error(f"Database insertion error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create user"
+        )
+
+    # Convert to UserInDB model
+    user_in_db = UserInDB(**user_data)
+
+    # Generate access token
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": email}, expires_delta=access_token_expires
+    )
+
+    # Prepare user response
+    user_response = User(
+        id=str(user_in_db.id),
+        email=user_in_db.email,
+        firstName=user_in_db.firstName,
+        lastName=user_in_db.lastName,
+        phone=user_in_db.phone,
+        address=user_in_db.address,
+        profileImage=user_in_db.profileImage,
+        role=user_in_db.role,
+        createdAt=user_in_db.createdAt,
+        updatedAt=user_in_db.updatedAt
+    )
+
+    # Send welcome email
+    welcome_html = f"""
+    <html>
+        <body>
+            <h1>Welcome to Sorted Concierge, {user_in_db.firstName}!</h1>
+            <p>Thank you for registering with us using your Google account.</p>
+            <p>We're excited to help you experience Luxury like never before.</p>
+            <p>Best regards,<br>The Sorted Concierge Team</p>
+        </body>
+    </html>
+    """
+    send_email(user_in_db.email, "Welcome to Sorted Concierge", welcome_html)
 
     return {
         "access_token": access_token,
