@@ -1828,7 +1828,7 @@ async def login_google(request: Request):
 #     }
 
 
-@router.get("/auth/google/login")
+@app.get("/auth/google/login")
 async def login_via_google(request: Request):
     """
     Initiates the Google OAuth flow
@@ -1837,7 +1837,7 @@ async def login_via_google(request: Request):
     return await oauth.google.authorize_redirect(request, redirect_uri)
 
 
-@router.get("/auth/google/callback")
+@app.get("/auth/google/callback")
 async def auth_google_callback(request: Request):
     try:
         token = await oauth.google.authorize_access_token(request)
@@ -1937,7 +1937,7 @@ async def auth_google_callback(request: Request):
         return HTMLResponse(response_html)
 
 
-@router.post("/auth/register/google")
+@app.post("/auth/register/google")
 async def register_with_google(google_user: GoogleUserCreate):
     try:
         # Validate Google token
