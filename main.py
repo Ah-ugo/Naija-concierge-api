@@ -1872,49 +1872,77 @@ async def login_via_google(request: Request):
 async def auth_google_callback(request: Request):
     """Handle Google OAuth callback"""
     try:
-        # Verify state
-        if request.session.get('oauth_state') != request.query_params.get('state'):
-            raise HTTPException(status_code=400, detail="Invalid state token")
-
-        # Get tokens
         token = await oauth.google.authorize_access_token(request)
-        userinfo = token.get('userinfo')
+    except Exception as e:
+        logger.error(f"Google OAuth error: {e}")
+        return RedirectResponse(
+            f"{FRONTEND_URL}/auth/callback?error=oauth_failed&message={quote(str(e))}"
+        )
 
-        if not userinfo or not userinfo.get('email'):
-            raise HTTPException(status_code=400, detail="Invalid user info")
+    # Get user info from Google
+    user_info = token.get('userinfo')
+    if not user_info:
+        return RedirectResponse(
+            f"{FRONTEND_URL}/auth/callback?error=no_user_info&message=Failed to get user info from Google"
+        )
 
-        # Process user (create if new)
-        email = userinfo['email']
+    email = user_info.get('email')
+    if not email:
+        return RedirectResponse(
+            f"{FRONTEND_URL}/auth/callback?error=no_email&message=Email not provided by Google"
+        )
+
+    try:
+        # Check if user exists
         user = db.users.find_one({"email": email})
-
         if not user:
+            # Create new user from Google info
             user_data = {
                 "email": email,
-                "firstName": userinfo.get('given_name', ''),
-                "lastName": userinfo.get('family_name', ''),
-                "profileImage": userinfo.get('picture'),
+                "firstName": user_info.get('given_name', ''),
+                "lastName": user_info.get('family_name', ''),
+                "profileImage": user_info.get('picture'),
                 "role": "user",
                 "createdAt": datetime.utcnow(),
                 "updatedAt": datetime.utcnow(),
-                "hashed_password": None
+                "hashed_password": None  # No password for Google users
             }
             result = db.users.insert_one(user_data)
-            user_data["_id"] = result.inserted_id
+            user_data["_id"] = str(result.inserted_id)
             user = user_data
 
-        # Create JWT
-        access_token = create_access_token(data={"sub": email})
+        # Create JWT token
+        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token = create_access_token(
+            data={"sub": email}, expires_delta=access_token_expires
+        )
 
-        # Redirect to frontend with tokens
-        frontend_url = os.getenv('FRONTEND_URL', 'https://sorted-concierge.vercel.app')
+        # Prepare user data for response
+        user_response = {
+            "id": str(user["_id"]),
+            "email": user["email"],
+            "firstName": user.get("firstName", ""),
+            "lastName": user.get("lastName", ""),
+            "phone": user.get("phone"),
+            "address": user.get("address"),
+            "profileImage": user.get("profileImage"),
+            "role": user["role"],
+            "createdAt": user["createdAt"].isoformat(),
+            "updatedAt": user["updatedAt"].isoformat()
+        }
+
+        # URL encode the user data
+        user_json = quote(json.dumps(user_response))
+
         return RedirectResponse(
-            url=f"{frontend_url}/auth/callback?token={access_token}&user={quote(json.dumps(user))}"
+            f"{FRONTEND_URL}/auth/callback?token={access_token}&user={user_json}"
         )
 
     except Exception as e:
-        logger.error(f"Google auth error: {str(e)}")
-        frontend_url = os.getenv('FRONTEND_URL', 'https://sorted-concierge.vercel.app')
-        return RedirectResponse(url=f"{frontend_url}/auth/callback?error={quote('Authentication failed')}")
+        logger.error(f"Error processing Google auth: {e}")
+        return RedirectResponse(
+            f"{FRONTEND_URL}/auth/callback?error=processing_error&message={quote(str(e))}"
+        )
 
 
 
