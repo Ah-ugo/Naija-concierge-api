@@ -1924,20 +1924,20 @@ async def auth_google_callback(request: Request):
         }
 
         # Redirect to frontend with tokens
-        frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:3000')
+        frontend_url = os.getenv('FRONTEND_URL', 'https://sorted-concierge.vercel.app')
         redirect_url = f"{frontend_url}/auth/callback?token={access_token}&user={quote(json.dumps(user_response))}"
 
         return RedirectResponse(url=redirect_url)
 
     except HTTPException as he:
         # Redirect to frontend with error
-        frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:3000')
+        frontend_url = os.getenv('FRONTEND_URL', 'https://sorted-concierge.vercel.app')
         error_message = quote(str(he.detail))
         return RedirectResponse(url=f"{frontend_url}/auth/callback?error={error_message}")
 
     except Exception as e:
         logger.error(f"Google auth error: {str(e)}")
-        frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:3000')
+        frontend_url = os.getenv('FRONTEND_URL', 'https://sorted-concierge.vercel.app')
         return RedirectResponse(url=f"{frontend_url}/auth/callback?error={quote('Authentication failed')}")
 
 
