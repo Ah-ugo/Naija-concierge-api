@@ -35,6 +35,7 @@ from starlette.config import Config
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.responses import RedirectResponse
 from urllib.parse import unquote, quote, urlparse
+from starlette.config import Config
 
 # Configure logging
 logging.basicConfig(
@@ -104,18 +105,35 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token")
 
 
-oauth = OAuth()
+oauth = OAuth(Config())
 
 # Configure Google OAuth
+# oauth.register(
+#     name='google',
+#     client_id=os.getenv('GOOGLE_CLIENT_ID'),
+#     client_secret=os.getenv('GOOGLE_CLIENT_SECRET'),
+#     server_metadata_url='https://accounts.google.com/.well-known/openid-configuration',
+#     client_kwargs={
+#         'scope': 'openid email profile'
+#     },
+# redirect_uri='https://sorted-concierge.vercel.app/auth/callback'
+# )
+
 oauth.register(
     name='google',
     client_id=os.getenv('GOOGLE_CLIENT_ID'),
     client_secret=os.getenv('GOOGLE_CLIENT_SECRET'),
-    server_metadata_url='https://accounts.google.com/.well-known/openid-configuration',
+    authorize_params=None,
+    authorize_url='https://accounts.google.com/o/oauth2/auth',
+    access_token_url='https://oauth2.googleapis.com/token',
+    access_token_params=None,
+    refresh_token_url=None,
+    redirect_uri="https://naija-concierge-api.onrender.com/auth/google/callback",
     client_kwargs={
-        'scope': 'openid email profile'
+        'scope': 'openid email profile',
+        'prompt': 'select_account',
     },
-redirect_uri='https://sorted-concierge.vercel.app/auth/callback'
+    server_metadata_url='https://accounts.google.com/.well-known/openid-configuration'
 )
 
 app = FastAPI(title="Naija Concierge API")
@@ -1830,120 +1848,157 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
 #     }
 
 
+@app.get("/auth/google/login")
+async def login_via_google(request: Request):
+    """
+    Initiate Google OAuth flow
+    """
+    # Generate a state token to prevent CSRF
+    state = str(uuid.uuid4())
+    request.session['oauth_state'] = state
 
-@app.get("/auth/google/login", include_in_schema=True)
-async def login_via_google(
-    request: Request,
-    redirect_uri: str,
-    register: bool = False
-):
-    """Initiate Google OAuth flow"""
-    try:
-        # Validate and clean redirect_uri
-        redirect_uri = unquote(redirect_uri)
-        if not any(
-            redirect_uri.startswith(domain)
-            for domain in [
-                "http://localhost:3000",
-                "https://sorted-concierge.vercel.app"
-                "https://thesortedconcierge.com"
-            ]
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid redirect URI"
-            )
-
-        # Store state in session
-        request.session["oauth_redirect"] = redirect_uri
-        request.session["oauth_register"] = register
-
-        # Initiate Google OAuth
-        return await oauth.google.authorize_redirect(
-            request,
-            redirect_uri,
-            access_type="offline",
-            prompt="select_account"
-        )
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Failed to initiate Google login: {str(e)}"
-        )
-
-
+    # Generate the authorization URL
+    redirect_uri = request.url_for('auth_google_callback')
+    return await oauth.google.authorize_redirect(request, redirect_uri, state=state)
 
 
 @app.get("/auth/google/callback")
 async def auth_google_callback(request: Request):
+    """
+    Handle Google OAuth callback
+    """
     try:
-        # Get the register flag from session
-        register = request.session.get("google_register", False)
-        redirect_uri = request.query_params.get('redirect_uri', FRONTEND_URL)
+        # Verify state token to prevent CSRF
+        if request.session.get('oauth_state') != request.query_params.get('state'):
+            raise HTTPException(status_code=400, detail="Invalid state token")
 
-        # Complete the OAuth flow
+        # Get the token from Google
         token = await oauth.google.authorize_access_token(request)
-        user_info = token.get('userinfo')
+        if not token:
+            raise HTTPException(status_code=400, detail="Failed to fetch access token")
 
-        if not user_info or not user_info.get('email'):
-            return RedirectResponse(
-                f"{redirect_uri}?error={quote('Failed to get user info from Google')}"
-            )
+        # Get user info from Google
+        userinfo = token.get('userinfo')
+        if not userinfo:
+            raise HTTPException(status_code=400, detail="Failed to fetch user info")
 
-        email = user_info['email']
+        email = userinfo.get('email')
+        if not email:
+            raise HTTPException(status_code=400, detail="Email not provided by Google")
 
-        # Check if user exists or create new
+        # Check if user exists or create new user
         user = db.users.find_one({"email": email})
 
         if not user:
-            if not register:
-                return RedirectResponse(
-                    f"{redirect_uri}?error={quote('Account not found. Please register first.')}"
-                )
-
+            # Create new user from Google info
             user_data = {
                 "email": email,
-                "firstName": user_info.get('given_name', ''),
-                "lastName": user_info.get('family_name', ''),
-                "profileImage": user_info.get('picture'),
+                "firstName": userinfo.get('given_name', ''),
+                "lastName": userinfo.get('family_name', ''),
+                "profileImage": userinfo.get('picture'),
                 "role": "user",
                 "createdAt": datetime.utcnow(),
                 "updatedAt": datetime.utcnow(),
-                "hashed_password": ""
+                "hashed_password": None  # No password for Google users
             }
+
             result = db.users.insert_one(user_data)
             user_data["_id"] = result.inserted_id
             user = user_data
 
-        # Generate JWT token
-        access_token = create_access_token(data={"sub": email})
+        # Create JWT token for API access
+        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token = create_access_token(
+            data={"sub": email},
+            expires_delta=access_token_expires
+        )
 
-        # Prepare success response
+        # Prepare user data for frontend
         user_response = {
             "id": str(user["_id"]),
             "email": user["email"],
             "firstName": user.get("firstName", ""),
             "lastName": user.get("lastName", ""),
-            "profileImage": user.get("profileImage", ""),
+            "profileImage": user.get("profileImage"),
             "role": user["role"]
         }
 
-        params = {
-            "token": access_token,
-            "user": json.dumps(user_response),
-            "register": "true" if register else "false"
-        }
+        # Redirect to frontend with tokens
+        frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:3000')
+        redirect_url = f"{frontend_url}/auth/callback?token={access_token}&user={quote(json.dumps(user_response))}"
 
-        return RedirectResponse(
-            f"{redirect_uri}?{urlencode(params)}"
-        )
+        return RedirectResponse(url=redirect_url)
+
+    except HTTPException as he:
+        # Redirect to frontend with error
+        frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:3000')
+        error_message = quote(str(he.detail))
+        return RedirectResponse(url=f"{frontend_url}/auth/callback?error={error_message}")
 
     except Exception as e:
-        redirect_uri = request.query_params.get('redirect_uri', FRONTEND_URL)
-        return RedirectResponse(
-            f"{redirect_uri}?error={quote(str(e))}"
+        logger.error(f"Google auth error: {str(e)}")
+        frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:3000')
+        return RedirectResponse(url=f"{frontend_url}/auth/callback?error={quote('Authentication failed')}")
+
+
+@app.post("/auth/google")
+async def auth_with_google_token(google_user: GoogleUserCreate):
+    """
+    Alternative endpoint for mobile apps to authenticate with Google token directly
+    """
+    try:
+        # Validate Google token
+        userinfo = await validate_google_token(google_user.google_token)
+        if not userinfo:
+            raise HTTPException(status_code=401, detail="Invalid Google token")
+
+        email = userinfo.get('email')
+        if not email:
+            raise HTTPException(status_code=400, detail="Email not provided by Google")
+
+        # Check if user exists or create new user
+        user = db.users.find_one({"email": email})
+
+        if not user:
+            # Create new user from Google info
+            user_data = {
+                "email": email,
+                "firstName": userinfo.get('given_name', ''),
+                "lastName": userinfo.get('family_name', ''),
+                "profileImage": userinfo.get('picture'),
+                "role": "user",
+                "createdAt": datetime.utcnow(),
+                "updatedAt": datetime.utcnow(),
+                "hashed_password": None
+            }
+
+            result = db.users.insert_one(user_data)
+            user_data["_id"] = result.inserted_id
+            user = user_data
+
+        # Create JWT token
+        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token = create_access_token(
+            data={"sub": email},
+            expires_delta=access_token_expires
         )
+
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "user": {
+                "id": str(user["_id"]),
+                "email": user["email"],
+                "firstName": user.get("firstName", ""),
+                "lastName": user.get("lastName", ""),
+                "profileImage": user.get("profileImage"),
+                "role": user["role"]
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"Google token auth error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Authentication failed")
 
 
 @app.post("/auth/register/google")
