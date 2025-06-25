@@ -36,6 +36,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.responses import RedirectResponse
 from urllib.parse import unquote, quote, urlparse
 from starlette.config import Config
+from starlette.middleware.sessions import SessionMiddleware
 
 # Configure logging
 logging.basicConfig(
@@ -148,10 +149,17 @@ app.add_middleware(
 
 )
 
+# app.add_middleware(
+#     SessionMiddleware,
+#     secret_key=SECRET_KEY,
+#     session_cookie="session"
+# )
+
 app.add_middleware(
     SessionMiddleware,
-    secret_key=SECRET_KEY,
-    session_cookie="session"
+    secret_key=os.getenv('SESSION_SECRET', 'your-very-secret-key-here'),
+    session_cookie='session_cookie',
+    max_age=3600
 )
 
 class PyObjectId(ObjectId):
@@ -1850,47 +1858,35 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
 
 @app.get("/auth/google/login")
 async def login_via_google(request: Request):
-    """
-    Initiate Google OAuth flow
-    """
-    # Generate a state token to prevent CSRF
+    """Initiate Google OAuth flow"""
+    # Generate state for CSRF protection
     state = str(uuid.uuid4())
     request.session['oauth_state'] = state
 
-    # Generate the authorization URL
-    redirect_uri = request.url_for('auth_google_callback')
+    redirect_uri = request.url_for("auth_google_callback")
     return await oauth.google.authorize_redirect(request, redirect_uri, state=state)
 
 
 @app.get("/auth/google/callback")
 async def auth_google_callback(request: Request):
-    """
-    Handle Google OAuth callback
-    """
+    """Handle Google OAuth callback"""
     try:
-        # Verify state token to prevent CSRF
+        # Verify state
         if request.session.get('oauth_state') != request.query_params.get('state'):
             raise HTTPException(status_code=400, detail="Invalid state token")
 
-        # Get the token from Google
+        # Get tokens
         token = await oauth.google.authorize_access_token(request)
-        if not token:
-            raise HTTPException(status_code=400, detail="Failed to fetch access token")
-
-        # Get user info from Google
         userinfo = token.get('userinfo')
-        if not userinfo:
-            raise HTTPException(status_code=400, detail="Failed to fetch user info")
 
-        email = userinfo.get('email')
-        if not email:
-            raise HTTPException(status_code=400, detail="Email not provided by Google")
+        if not userinfo or not userinfo.get('email'):
+            raise HTTPException(status_code=400, detail="Invalid user info")
 
-        # Check if user exists or create new user
+        # Process user (create if new)
+        email = userinfo['email']
         user = db.users.find_one({"email": email})
 
         if not user:
-            # Create new user from Google info
             user_data = {
                 "email": email,
                 "firstName": userinfo.get('given_name', ''),
@@ -1899,46 +1895,26 @@ async def auth_google_callback(request: Request):
                 "role": "user",
                 "createdAt": datetime.utcnow(),
                 "updatedAt": datetime.utcnow(),
-                "hashed_password": None  # No password for Google users
+                "hashed_password": None
             }
-
             result = db.users.insert_one(user_data)
             user_data["_id"] = result.inserted_id
             user = user_data
 
-        # Create JWT token for API access
-        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-        access_token = create_access_token(
-            data={"sub": email},
-            expires_delta=access_token_expires
-        )
-
-        # Prepare user data for frontend
-        user_response = {
-            "id": str(user["_id"]),
-            "email": user["email"],
-            "firstName": user.get("firstName", ""),
-            "lastName": user.get("lastName", ""),
-            "profileImage": user.get("profileImage"),
-            "role": user["role"]
-        }
+        # Create JWT
+        access_token = create_access_token(data={"sub": email})
 
         # Redirect to frontend with tokens
         frontend_url = os.getenv('FRONTEND_URL', 'https://sorted-concierge.vercel.app')
-        redirect_url = f"{frontend_url}/auth/callback?token={access_token}&user={quote(json.dumps(user_response))}"
-
-        return RedirectResponse(url=redirect_url)
-
-    except HTTPException as he:
-        # Redirect to frontend with error
-        frontend_url = os.getenv('FRONTEND_URL', 'https://sorted-concierge.vercel.app')
-        error_message = quote(str(he.detail))
-        return RedirectResponse(url=f"{frontend_url}/auth/callback?error={error_message}")
+        return RedirectResponse(
+            url=f"{frontend_url}/auth/callback?token={access_token}&user={quote(json.dumps(user))}"
+        )
 
     except Exception as e:
         logger.error(f"Google auth error: {str(e)}")
         frontend_url = os.getenv('FRONTEND_URL', 'https://sorted-concierge.vercel.app')
         return RedirectResponse(url=f"{frontend_url}/auth/callback?error={quote('Authentication failed')}")
+
 
 
 @app.post("/auth/google")
