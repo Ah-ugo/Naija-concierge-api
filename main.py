@@ -34,6 +34,7 @@ from authlib.integrations.starlette_client import OAuth
 from starlette.config import Config
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.responses import RedirectResponse
+from urllib.parse import unquote, quote, urlparse
 
 # Configure logging
 logging.basicConfig(
@@ -113,7 +114,8 @@ oauth.register(
     server_metadata_url='https://accounts.google.com/.well-known/openid-configuration',
     client_kwargs={
         'scope': 'openid email profile'
-    }
+    },
+redirect_uri='https://sorted-concierge.vercel.app/auth/callback'
 )
 
 app = FastAPI(title="Naija Concierge API")
@@ -1524,11 +1526,11 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
 
 
 
-@app.get("/auth/google/login")
-async def login_google(request: Request):
-    # Absolute redirect URL for Google OAuth
-    redirect_uri = request.url_for('auth_google_callback')
-    return await oauth.google.authorize_redirect(request, str(redirect_uri))
+# @app.get("/auth/google/login")
+# async def login_google(request: Request):
+#     # Absolute redirect URL for Google OAuth
+#     redirect_uri = request.url_for('auth_google_callback')
+#     return await oauth.google.authorize_redirect(request, str(redirect_uri))
 
 
 # @app.get("/auth/google/callback")
@@ -1828,33 +1830,49 @@ async def login_google(request: Request):
 #     }
 
 
-@app.get("/auth/google/login")
-async def login_via_google(request: Request, redirect_uri: str, register: bool = False):
-    """
-    Initiates Google OAuth flow with proper redirect handling
-    """
-    # Validate redirect_uri for security
-    allowed_domains = [
-        "http://localhost:3000",
-        "https://sorted-concierge.vercel.app",
-        "https://naija-concierge-api.onrender.com",
-        "https://thesortedconcierge.com"
-    ]
 
-    if not any(redirect_uri.startswith(domain) for domain in allowed_domains):
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid redirect URI"
+@app.get("/auth/google/login", include_in_schema=True)
+async def login_via_google(
+    request: Request,
+    redirect_uri: str,
+    register: bool = False
+):
+    """Initiate Google OAuth flow"""
+    try:
+        # Validate and clean redirect_uri
+        redirect_uri = unquote(redirect_uri)
+        if not any(
+            redirect_uri.startswith(domain)
+            for domain in [
+                "http://localhost:3000",
+                "https://sorted-concierge.vercel.app"
+                "https://thesortedconcierge.com"
+            ]
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid redirect URI"
+            )
+
+        # Store state in session
+        request.session["oauth_redirect"] = redirect_uri
+        request.session["oauth_register"] = register
+
+        # Initiate Google OAuth
+        return await oauth.google.authorize_redirect(
+            request,
+            redirect_uri,
+            access_type="offline",
+            prompt="select_account"
         )
 
-    # Store register flag in session
-    request.session["google_register"] = register
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to initiate Google login: {str(e)}"
+        )
 
-    # Initiate Google OAuth flow
-    return await oauth.google.authorize_redirect(
-        request,
-        redirect_uri
-    )
+
 
 
 @app.get("/auth/google/callback")
