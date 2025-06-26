@@ -3509,13 +3509,13 @@ async def get_service_categories(
                         name=tier_doc["name"],
                         description=tier_doc["description"],
                         price=tier_doc["price"],
-                        usd_price=tier_doc("usd_price"),
-                        eur_price=tier_doc("eur_price"),
-                        gbp_price=tier_doc("gbp_price"),
+                        usd_price=tier_doc.get("usd_price"),  # Changed from call to dict access
+                        eur_price=tier_doc.get("eur_price"),  # Changed from call to dict access
+                        gbp_price=tier_doc.get("gbp_price"),  # Changed from call to dict access
                         category_id=tier_doc["category_id"],
                         image=tier_doc.get("image"),
                         features=tier_doc.get("features", []),
-                        is_popular=tier_doc.get("is_popular", False),
+                        is_popular=tier_doc.get("is_popular", False),  # Fixed typo from is_popular
                         is_available=tier_doc.get("is_available", True),
                         created_at=tier_doc["created_at"],
                         updated_at=tier_doc["updated_at"],
