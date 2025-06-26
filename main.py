@@ -336,12 +336,24 @@ class ServiceCategory(ServiceCategoryBase):
 class ServiceTierBase(BaseModel):
     name: str  # e.g., "Tier 1", "Tier 2"
     description: str
-    price: float  # Price for this tier
+    price: float  # Base price in NGN
     category_id: str  # Reference to ServiceCategory
     image: Optional[str] = None
     features: List[str] = []  # Tier-level features
     is_popular: bool = False
     is_available: bool = True
+    usd_price: Optional[float] = Field(
+        None,
+        description="Manual USD price. If not set, will use NGN price with default conversion"
+    )
+    eur_price: Optional[float] = Field(
+        None,
+        description="Manual EUR price. If not set, will use NGN price with default conversion"
+    )
+    gbp_price: Optional[float] = Field(
+        None,
+        description="Manual GBP price. If not set, will use NGN price with default conversion"
+    )
 
 
 class ServiceTierCreate(ServiceTierBase):
@@ -357,6 +369,9 @@ class ServiceTierUpdate(BaseModel):
     features: Optional[List[str]] = None
     is_popular: Optional[bool] = None
     is_available: Optional[bool] = None
+    usd_price: Optional[float] = None
+    eur_price: Optional[float] = None
+    gbp_price: Optional[float] = None
 
 
 class ServiceTierInDB(ServiceTierBase):
@@ -1158,9 +1173,41 @@ def add_to_airtable(booking_data: Dict) -> Dict:
         )
 
 
-# Flutterwave Payment Integration Functions
-# def generate_flutterwave_payment_url(booking_data: Dict, user_data: Dict, amount: float) -> str:
-#     """Generate Flutterwave payment URL for tier bookings"""
+async def convert_price(tier_id: str, currency: str) -> float:
+    """Get the price for a tier in the specified currency"""
+    if currency == "NGN":
+        # For NGN, just return the base price
+        tier = db.service_tiers.find_one({"_id": ObjectId(tier_id)})
+        if not tier:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Service tier not found"
+            )
+        return tier["price"]
+
+    # For other currencies, check if manual price exists
+    tier = db.service_tiers.find_one({"_id": ObjectId(tier_id)})
+    if not tier:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Service tier not found"
+        )
+
+    currency_field = f"{currency.lower()}_price"
+    if currency_field in tier and tier[currency_field] is not None:
+        return tier[currency_field]
+
+    # If no manual price exists, fall back to NGN price
+    return tier["price"]
+
+
+# def generate_flutterwave_payment_url(
+#     booking_data: Dict,
+#     user_data: Dict,
+#     amount: float,
+#     currency: str = "NGN"
+# ) -> str:
+#     """Generate Flutterwave payment URL with proper currency support"""
 #     if not FLUTTERWAVE_SECRET_KEY:
 #         logger.error("Flutterwave secret key not configured")
 #         raise HTTPException(
@@ -1172,13 +1219,21 @@ def add_to_airtable(booking_data: Dict) -> Dict:
 #         # Generate unique transaction reference
 #         tx_ref = f"booking_{booking_data['id']}_{uuid.uuid4().hex[:8]}"
 #
-#         # Flutterwave payment payload
+#         # Ensure amount is properly formatted for the currency
+#         if currency == "NGN":
+#             # NGN amounts should be whole numbers
+#             formatted_amount = int(amount)
+#         else:
+#             # Other currencies can have decimals
+#             formatted_amount = round(amount, 2)
+#
+#         # Flutterwave payment payload with proper currency handling
 #         payment_payload = {
 #             "tx_ref": tx_ref,
-#             "amount": amount,
-#             "currency": "NGN",
-#             "redirect_url": f"{FRONTEND_URL}/booking/confirmation",
-#             "payment_options": "card,banktransfer,ussd",
+#             "amount": formatted_amount,
+#             "currency": currency,
+#             "redirect_url": f"{FRONTEND_URL}/booking/payment-success?tx_ref={tx_ref}",
+#             "payment_options": "card,banktransfer,ussd" if currency == "NGN" else "card",
 #             "customer": {
 #                 "email": user_data["email"],
 #                 "phonenumber": user_data.get("phone", ""),
@@ -1186,13 +1241,16 @@ def add_to_airtable(booking_data: Dict) -> Dict:
 #             },
 #             "customizations": {
 #                 "title": "Naija Concierge - Tier Booking",
-#                 "description": f"Payment for tier booking",
+#                 "description": f"Payment for tier booking ({currency} {formatted_amount})",
 #                 "logo": "https://your-logo-url.com/logo.png"
 #             },
 #             "meta": {
 #                 "booking_id": str(booking_data["id"]),
 #                 "user_id": user_data["id"],
-#                 "booking_type": "tier_booking"
+#                 "booking_type": "tier_booking",
+#                 "original_currency": "NGN",
+#                 "payment_currency": currency,
+#                 "original_amount": booking_data.get("original_amount", amount)
 #             }
 #         }
 #
@@ -1210,10 +1268,15 @@ def add_to_airtable(booking_data: Dict) -> Dict:
 #
 #         payment_data = response.json()
 #         if payment_data["status"] == "success":
-#             # Update booking with transaction reference
+#             # Update booking with transaction reference and currency info
 #             db.bookings.update_one(
 #                 {"_id": ObjectId(booking_data["id"])},
-#                 {"$set": {"flutterwave_tx_ref": tx_ref}}
+#                 {"$set": {
+#                     "flutterwave_tx_ref": tx_ref,
+#                     "payment_currency": currency,
+#                     "payment_amount_original": booking_data.get("original_amount", amount),
+#                     "payment_amount_converted": formatted_amount
+#                 }}
 #             )
 #             return payment_data["data"]["link"]
 #         else:
@@ -1232,13 +1295,12 @@ def add_to_airtable(booking_data: Dict) -> Dict:
 #             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
 #             detail="Failed to generate payment URL"
 #         )
-#
+
 
 def generate_flutterwave_payment_url(
-    booking_data: Dict,
-    user_data: Dict,
-    amount: float,
-    currency: str = "NGN"
+        booking_data: Dict,
+        user_data: Dict,
+        preferred_currency: str = "NGN"
 ) -> str:
     """Generate Flutterwave payment URL with proper currency support"""
     if not FLUTTERWAVE_SECRET_KEY:
@@ -1249,24 +1311,27 @@ def generate_flutterwave_payment_url(
         )
 
     try:
+        # Get the tier to determine pricing
+        tier_id = booking_data.get("tier_id")
+        if not tier_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Tier ID is required for payment"
+            )
+
+        # Get the price in the preferred currency
+        amount = convert_price(tier_id, preferred_currency)
+
         # Generate unique transaction reference
         tx_ref = f"booking_{booking_data['id']}_{uuid.uuid4().hex[:8]}"
-
-        # Ensure amount is properly formatted for the currency
-        if currency == "NGN":
-            # NGN amounts should be whole numbers
-            formatted_amount = int(amount)
-        else:
-            # Other currencies can have decimals
-            formatted_amount = round(amount, 2)
 
         # Flutterwave payment payload with proper currency handling
         payment_payload = {
             "tx_ref": tx_ref,
-            "amount": formatted_amount,
-            "currency": currency,
+            "amount": amount,
+            "currency": preferred_currency,
             "redirect_url": f"{FRONTEND_URL}/booking/payment-success?tx_ref={tx_ref}",
-            "payment_options": "card,banktransfer,ussd" if currency == "NGN" else "card",
+            "payment_options": "card,banktransfer,ussd" if preferred_currency == "NGN" else "card",
             "customer": {
                 "email": user_data["email"],
                 "phonenumber": user_data.get("phone", ""),
@@ -1274,7 +1339,7 @@ def generate_flutterwave_payment_url(
             },
             "customizations": {
                 "title": "Naija Concierge - Tier Booking",
-                "description": f"Payment for tier booking ({currency} {formatted_amount})",
+                "description": f"Payment for tier booking ({preferred_currency} {amount})",
                 "logo": "https://your-logo-url.com/logo.png"
             },
             "meta": {
@@ -1282,7 +1347,7 @@ def generate_flutterwave_payment_url(
                 "user_id": user_data["id"],
                 "booking_type": "tier_booking",
                 "original_currency": "NGN",
-                "payment_currency": currency,
+                "payment_currency": preferred_currency,
                 "original_amount": booking_data.get("original_amount", amount)
             }
         }
@@ -1306,9 +1371,9 @@ def generate_flutterwave_payment_url(
                 {"_id": ObjectId(booking_data["id"])},
                 {"$set": {
                     "flutterwave_tx_ref": tx_ref,
-                    "payment_currency": currency,
+                    "payment_currency": preferred_currency,
                     "payment_amount_original": booking_data.get("original_amount", amount),
-                    "payment_amount_converted": formatted_amount
+                    "payment_amount_converted": amount
                 }}
             )
             return payment_data["data"]["link"]
@@ -1328,7 +1393,6 @@ def generate_flutterwave_payment_url(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to generate payment URL"
         )
-
 
 
 def verify_flutterwave_payment(tx_ref: str) -> Dict:
@@ -1552,308 +1616,7 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
 
 
 
-# @app.get("/auth/google/login")
-# async def login_google(request: Request):
-#     # Absolute redirect URL for Google OAuth
-#     redirect_uri = request.url_for('auth_google_callback')
-#     return await oauth.google.authorize_redirect(request, str(redirect_uri))
 
-
-# @app.get("/auth/google/callback")
-# async def auth_google_callback(request: Request):
-#     try:
-#         token = await oauth.google.authorize_access_token(request)
-#     except Exception as e:
-#         logger.error(f"Google OAuth error: {e}")
-#         raise HTTPException(
-#             status_code=status.HTTP_401_UNAUTHORIZED,
-#             detail="Failed to authenticate with Google"
-#         )
-#
-#     # Get user info from Google
-#     user_info = token.get('userinfo')
-#     if not user_info:
-#         raise HTTPException(
-#             status_code=status.HTTP_400_BAD_REQUEST,
-#             detail="Failed to get user info from Google"
-#         )
-#
-#     email = user_info.get('email')
-#     if not email:
-#         raise HTTPException(
-#             status_code=status.HTTP_400_BAD_REQUEST,
-#             detail="Email not provided by Google"
-#         )
-#
-#     # Check if user exists
-#     user = db.users.find_one({"email": email})
-#
-#     if not user:
-#         # Create new user from Google info
-#         user_data = {
-#             "email": email,
-#             "firstName": user_info.get('given_name', ''),
-#             "lastName": user_info.get('family_name', ''),
-#             "profileImage": user_info.get('picture'),
-#             "role": "user",
-#             "createdAt": datetime.utcnow(),
-#             "updatedAt": datetime.utcnow(),
-#             "hashed_password": ""  # No password for Google users
-#         }
-#
-#         try:
-#             result = db.users.insert_one(user_data)
-#             user_data["_id"] = result.inserted_id
-#             user = user_data
-#         except Exception as e:
-#             logger.error(f"Failed to create user from Google auth: {e}")
-#             raise HTTPException(
-#                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-#                 detail="Failed to create user account"
-#             )
-#
-#     # Convert to UserInDB model
-#     user_in_db = UserInDB(
-#         id=user["_id"],
-#         email=user["email"],
-#         firstName=user.get("firstName", ""),
-#         lastName=user.get("lastName", ""),
-#         phone=user.get("phone"),
-#         address=user.get("address"),
-#         profileImage=user.get("profileImage"),
-#         role=user["role"],
-#         createdAt=user["createdAt"],
-#         updatedAt=user["updatedAt"],
-#         hashed_password=user.get("hashed_password", "")
-#     )
-#
-#     # Create JWT token (same as regular login)
-#     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-#     access_token = create_access_token(
-#         data={"sub": email}, expires_delta=access_token_expires
-#     )
-#
-#     # Prepare user response
-#     user_response = User(
-#         id=str(user_in_db.id),
-#         email=user_in_db.email,
-#         firstName=user_in_db.firstName,
-#         lastName=user_in_db.lastName,
-#         phone=user_in_db.phone,
-#         address=user_in_db.address,
-#         profileImage=user_in_db.profileImage,
-#         role=user_in_db.role,
-#         createdAt=user_in_db.createdAt,
-#         updatedAt=user_in_db.updatedAt
-#     )
-#
-#     return {
-#         "access_token": access_token,
-#         "token_type": "bearer",
-#         "user": user_response
-#     }
-
-
-
-
-# @app.get("/auth/google/callback")
-# async def auth_google_callback(request: Request):
-#     try:
-#         token = await oauth.google.authorize_access_token(request)
-#     except Exception as e:
-#         logger.error(f"Google OAuth error: {e}")
-#         # Redirect to frontend with error
-#         error_params = urlencode({
-#             "error": "oauth_failed",
-#             "message": "Failed to authenticate with Google"
-#         })
-#         return RedirectResponse(
-#             f"{FRONTEND_URL}/auth/callback?{error_params}"
-#         )
-#
-#     # Get user info from Google
-#     user_info = token.get('userinfo')
-#     if not user_info:
-#         error_params = urlencode({
-#             "error": "no_user_info",
-#             "message": "Failed to get user info from Google"
-#         })
-#         return RedirectResponse(
-#             f"{FRONTEND_URL}/auth/callback?{error_params}"
-#         )
-#
-#     email = user_info.get('email')
-#     if not email:
-#         error_params = urlencode({
-#             "error": "no_email",
-#             "message": "Email not provided by Google"
-#         })
-#         return RedirectResponse(
-#             f"{FRONTEND_URL}/auth/callback?{error_params}"
-#         )
-#
-#     try:
-#         # Check if user exists
-#         user = db.users.find_one({"email": email})
-#
-#         if not user:
-#             # Create new user from Google info
-#             user_data = {
-#                 "email": email,
-#                 "firstName": user_info.get('given_name', ''),
-#                 "lastName": user_info.get('family_name', ''),
-#                 "profileImage": user_info.get('picture'),
-#                 "role": "user",
-#                 "createdAt": datetime.utcnow(),
-#                 "updatedAt": datetime.utcnow(),
-#                 "hashed_password": ""  # No password for Google users
-#             }
-#
-#             result = db.users.insert_one(user_data)
-#             user_data["_id"] = result.inserted_id
-#             user = user_data
-#
-#         # Create JWT token
-#         access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-#         access_token = create_access_token(
-#             data={"sub": email}, expires_delta=access_token_expires
-#         )
-#
-#         # Prepare success redirect URL with token and user data
-#         success_params = urlencode({
-#             "token": access_token,
-#             "user": json.dumps({
-#                 "id": str(user["_id"]),
-#                 "email": user["email"],
-#                 "firstName": user.get("firstName", ""),
-#                 "lastName": user.get("lastName", ""),
-#                 "phone": user.get("phone"),
-#                 "address": user.get("address"),
-#                 "profileImage": user.get("profileImage"),
-#                 "role": user["role"],
-#                 "createdAt": user["createdAt"].isoformat(),
-#                 "updatedAt": user["updatedAt"].isoformat()
-#             })
-#         })
-#
-#         return RedirectResponse(
-#             f"{FRONTEND_URL}/auth/callback?{success_params}"
-#         )
-#
-#     except Exception as e:
-#         logger.error(f"Error processing Google auth: {e}")
-#         error_params = urlencode({
-#             "error": "processing_error",
-#             "message": "Failed to process authentication"
-#         })
-#         return RedirectResponse(
-#             f"{FRONTEND_URL}/auth/callback?{error_params}"
-#         )
-#
-# @app.get("/auth/google/callback/success")
-# async def google_auth_success(request: Request, token: str, user: str):
-#     user_data = json.loads(user)
-#     return JSONResponse({
-#         "type": "google-auth-success",
-#         "token": token,
-#         "user": user_data
-#     })
-#
-# @app.get("/auth/google/callback/error")
-# async def google_auth_error(request: Request, message: str):
-#     return JSONResponse({
-#         "type": "google-auth-error",
-#         "message": message
-#     })
-#
-#
-# @app.post("/auth/register/google", response_model=Token)
-# async def register_with_google(google_user: GoogleUserCreate):
-#     """
-#     Register a new user using Google authentication.
-#
-#     Requires a valid Google ID token obtained from the frontend Google Sign-In flow.
-#     """
-#     # Validate Google token
-#     try:
-#         user_info = await validate_google_token(google_user.google_token)
-#     except Exception as e:
-#         logger.error(f"Google token validation error: {e}")
-#         raise HTTPException(
-#             status_code=status.HTTP_401_UNAUTHORIZED,
-#             detail="Invalid Google token"
-#         )
-#
-#     # Check required fields
-#     if not user_info.get("email"):
-#         raise HTTPException(
-#             status_code=status.HTTP_400_BAD_REQUEST,
-#             detail="Email not provided by Google"
-#         )
-#
-#     email = user_info["email"]
-#
-#     # Check if user already exists
-#     if db.users.find_one({"email": email}):
-#         raise HTTPException(
-#             status_code=status.HTTP_400_BAD_REQUEST,
-#             detail="Email already registered"
-#         )
-#
-#     # Create new user
-#     user_data = create_user_from_google(user_info)
-#
-#     try:
-#         result = db.users.insert_one(user_data)
-#         user_data["_id"] = result.inserted_id
-#     except Exception as e:
-#         logger.error(f"Database insertion error: {e}")
-#         raise HTTPException(
-#             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-#             detail="Failed to create user"
-#         )
-#
-#     # Convert to UserInDB model
-#     user_in_db = UserInDB(**user_data)
-#
-#     # Generate access token
-#     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-#     access_token = create_access_token(
-#         data={"sub": email}, expires_delta=access_token_expires
-#     )
-#
-#     # Prepare user response
-#     user_response = User(
-#         id=str(user_in_db.id),
-#         email=user_in_db.email,
-#         firstName=user_in_db.firstName,
-#         lastName=user_in_db.lastName,
-#         phone=user_in_db.phone,
-#         address=user_in_db.address,
-#         profileImage=user_in_db.profileImage,
-#         role=user_in_db.role,
-#         createdAt=user_in_db.createdAt,
-#         updatedAt=user_in_db.updatedAt
-#     )
-#
-#     # Send welcome email
-#     welcome_html = f"""
-#     <html>
-#         <body>
-#             <h1>Welcome to Sorted Concierge, {user_in_db.firstName}!</h1>
-#             <p>Thank you for registering with us using your Google account.</p>
-#             <p>We're excited to help you experience Luxury like never before.</p>
-#             <p>Best regards,<br>The Sorted Concierge Team</p>
-#         </body>
-#     </html>
-#     """
-#     send_email(user_in_db.email, "Welcome to Sorted Concierge", welcome_html)
-#
-#     return {
-#         "access_token": access_token,
-#         "token_type": "bearer",
-#         "user": user_response
-#     }
 
 
 
@@ -4522,6 +4285,9 @@ async def delete_service_tier(
         )
 
 
+
+
+
 @app.put("/services/{service_id}", response_model=Service)
 async def update_service(
         service_id: str,
@@ -5013,12 +4779,11 @@ async def upload_service_tier_image(
     return {"imageUrl": image_url}
 
 
-
 @app.get("/service-tiers/{tier_id}/convert")
 async def convert_tier_price(
-    tier_id: str,
-    currency: str,
-    # current_user: UserInDB = Depends(get_current_active_user)
+        tier_id: str,
+        currency: str,
+        # current_user: UserInDB = Depends(get_current_active_user)
 ):
     """Convert tier price to the specified currency"""
     allowed_currencies = ["NGN", "USD", "EUR", "GBP"]
@@ -5035,34 +4800,33 @@ async def convert_tier_price(
                 status_code=404,
                 detail="Service tier not found"
             )
+
+        if currency == "NGN":
+            converted_price = tier["price"]
+            exchange_rate = 1.0
+        else:
+            currency_field = f"{currency.lower()}_price"
+            if currency_field in tier and tier[currency_field] is not None:
+                converted_price = tier[currency_field]
+                exchange_rate = converted_price / tier["price"] if tier["price"] > 0 else 0
+            else:
+                converted_price = tier["price"]
+                exchange_rate = 1.0
+
+        return {
+            "convertedPrice": converted_price,
+            "originalPrice": tier["price"],
+            "originalCurrency": "NGN",
+            "targetCurrency": currency,
+            "exchangeRate": exchange_rate,
+            "isManualRate": currency.lower() + "_price" in tier and tier[currency.lower() + "_price"] is not None
+        }
     except Exception as e:
         logger.error(f"Error fetching tier: {e}")
         raise HTTPException(
             status_code=400,
             detail="Invalid tier ID"
         )
-
-    base_currency = "NGN"
-    amount = tier["price"]
-
-    if currency != base_currency:
-        try:
-            amount = await convert_price(tier["price"], base_currency, currency)
-        except Exception as e:
-            logger.error(f"Currency conversion failed: {e}")
-            raise HTTPException(
-                status_code=500,
-                detail="Failed to convert currency"
-            )
-
-    return {
-        "convertedPrice": amount,
-        "originalPrice": tier["price"],
-        "originalCurrency": base_currency,
-        "targetCurrency": currency,
-        "exchangeRate": amount / tier["price"] if tier["price"] > 0 else 0
-    }
-
 
 
 # Service routes
