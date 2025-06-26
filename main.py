@@ -1323,9 +1323,9 @@ def generate_flutterwave_payment_url(
                 "name": f"{user_data['firstName']} {user_data['lastName']}"
             },
             "customizations": {
-                "title": "Naija Concierge - Tier Booking",
+                "title": "Sorted Concierge - Tier Booking",
                 "description": f"Payment for tier booking ({preferred_currency} {amount})",
-                "logo": "https://your-logo-url.com/logo.png"
+                "logo": "https://res.cloudinary.com/dejeplzpv/image/upload/v1750948776/naija_concierge/service_tiers/c07e37e3-15e3-48b4-b7ee-31c2f2ad8fcc.png"
             },
             "meta": {
                 "booking_id": str(booking_data["id"]),
