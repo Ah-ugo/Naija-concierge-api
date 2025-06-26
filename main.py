@@ -5465,7 +5465,6 @@ async def create_tier_booking_with_currency(
         current_user: UserInDB = Depends(get_current_active_user)
 ):
     """Create a tier booking with multi-currency support"""
-
     # Validate currency
     allowed_currencies = ["NGN", "USD", "EUR", "GBP"]
     if preferred_currency not in allowed_currencies:
@@ -5526,33 +5525,47 @@ async def create_tier_booking_with_currency(
     created_booking = db.bookings.find_one({"_id": result.inserted_id})
 
     # Generate payment URL with proper currency
+    payment_url = None  # Initialize as None
     try:
         payment_url = generate_flutterwave_payment_url(
             {
                 "id": str(created_booking["_id"]),
-                "original_amount": original_price
+                "original_amount": original_price,
+                "tier_id": tier_id
             },
             current_user.__dict__,
             converted_price,
             preferred_currency
         )
 
-        # Update booking with payment URL
-        db.bookings.update_one(
-            {"_id": result.inserted_id},
-            {"$set": {"payment_url": payment_url}}
-        )
-
-        created_booking["payment_url"] = payment_url
+        # Update booking with payment URL if generated
+        if payment_url:
+            db.bookings.update_one(
+                {"_id": result.inserted_id},
+                {"$set": {"payment_url": payment_url}}
+            )
+            created_booking["payment_url"] = payment_url
 
     except Exception as e:
         logger.error(f"Payment URL generation failed: {e}")
-        # Continue without payment URL
+        payment_url = None  # Explicitly set to None on failure
 
-    # Send confirmation email
+    # Get tier services for email
     tier_services = list(db.services.find({"tier_id": tier_id}))
     service_list = ", ".join([s["name"] for s in tier_services])
 
+    # Build payment section for email
+    payment_section = ""
+    if payment_url:
+        payment_section = f"""
+        <p>Payment URL: <a href='{payment_url}'>Complete Payment</a></p>
+        """
+    else:
+        payment_section = """
+        <p>We couldn't generate a payment link automatically. Please contact support to complete your payment.</p>
+        """
+
+    # Send confirmation email
     booking_html = f"""
     <html>
         <body>
@@ -5569,7 +5582,7 @@ async def create_tier_booking_with_currency(
                 <li>Original Price: NGN {original_price:,.2f}</li>
                 <li>Status: Pending Payment</li>
             </ul>
-            <p>Payment URL: <a href='{payment_url}'>Complete Payment</a></p>
+            {payment_section}
             <p>Best regards,<br>The Naija Concierge Team</p>
         </body>
     </html>
