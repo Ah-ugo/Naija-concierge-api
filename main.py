@@ -1295,6 +1295,7 @@ async def convert_price(tier_id: str, currency: str) -> float:
 def generate_flutterwave_payment_url(
         booking_data: Dict,
         user_data: Dict,
+        amount: float,
         preferred_currency: str = "NGN"
 ) -> str:
     """Generate Flutterwave payment URL with proper currency support"""
@@ -1306,24 +1307,13 @@ def generate_flutterwave_payment_url(
         )
 
     try:
-        # Get the tier to determine pricing
-        tier_id = booking_data.get("tier_id")
-        if not tier_id:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Tier ID is required for payment"
-            )
-
-        # Get the price in the preferred currency
-        amount = convert_price(tier_id, preferred_currency)
-
         # Generate unique transaction reference
         tx_ref = f"booking_{booking_data['id']}_{uuid.uuid4().hex[:8]}"
 
         # Flutterwave payment payload with proper currency handling
         payment_payload = {
             "tx_ref": tx_ref,
-            "amount": amount,
+            "amount": str(amount),  # Convert to string as required by Flutterwave
             "currency": preferred_currency,
             "redirect_url": f"{FRONTEND_URL}/booking/payment-success?tx_ref={tx_ref}",
             "payment_options": "card,banktransfer,ussd" if preferred_currency == "NGN" else "card",
@@ -1343,7 +1333,8 @@ def generate_flutterwave_payment_url(
                 "booking_type": "tier_booking",
                 "original_currency": "NGN",
                 "payment_currency": preferred_currency,
-                "original_amount": booking_data.get("original_amount", amount)
+                "original_amount": booking_data.get("original_amount", amount),
+                "tier_id": booking_data.get("tier_id")
             }
         }
 
@@ -1374,7 +1365,7 @@ def generate_flutterwave_payment_url(
             return payment_data["data"]["link"]
         else:
             logger.error(f"Payment URL generation failed: {payment_data}")
-            raise Exception(f"Payment URL generation failed: {payment_data}")
+            raise Exception(f"Payment URL generation failed: {payment_data['message']}")
 
     except requests.exceptions.RequestException as e:
         logger.error(f"Flutterwave API request error: {e}")
@@ -1388,6 +1379,7 @@ def generate_flutterwave_payment_url(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to generate payment URL"
         )
+
 
 
 def verify_flutterwave_payment(tx_ref: str) -> Dict:
@@ -1464,14 +1456,7 @@ async def get_exchange_rate(from_currency: str, to_currency: str) -> float:
             return fallback_rates.get(from_currency, {}).get(to_currency, 1.0)
 
 
-async def convert_price(amount: float, from_currency: str, to_currency: str) -> float:
-    """Convert price from one currency to another"""
-    if from_currency == to_currency:
-        return amount
 
-    exchange_rate = await get_exchange_rate(from_currency, to_currency)
-    converted_amount = amount * exchange_rate
-    return round(converted_amount, 2)
 
 
 
@@ -5494,11 +5479,17 @@ async def create_tier_booking_with_currency(
             detail="Invalid tier ID"
         )
 
-    # Convert price to preferred currency
-    original_price = tier["price"]  # Assuming stored in NGN
+    # Get price in preferred currency
+    original_price = tier["price"]  # Base price in NGN
     converted_price = original_price
 
-    if preferred_currency != "NGN":
+    # Check if tier has manually set prices for the preferred currency
+    currency_field = f"{preferred_currency.lower()}_price"
+    if currency_field in tier and tier[currency_field] is not None:
+        # Use the manually set price if available
+        converted_price = tier[currency_field]
+    elif preferred_currency != "NGN":
+        # Fall back to currency conversion if no manual price exists
         try:
             converted_price = await convert_price(original_price, "NGN", preferred_currency)
         except Exception as e:
@@ -5518,7 +5509,9 @@ async def create_tier_booking_with_currency(
         booking_type=BookingType.TIER_BOOKING,
         payment_required=True,
         payment_amount=converted_price,
-        payment_status=PaymentStatus.PENDING
+        payment_status=PaymentStatus.PENDING,
+        payment_currency=preferred_currency,
+        original_amount=original_price
     )
 
     result = db.bookings.insert_one(booking_data.dict(by_alias=True))
@@ -5645,6 +5638,8 @@ async def create_tier_booking_with_currency(
         service=None,
         tier=tier_obj
     )
+
+
 
 @app.get("/bookings", response_model=List[Booking])
 async def get_bookings(
