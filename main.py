@@ -342,18 +342,9 @@ class ServiceTierBase(BaseModel):
     features: List[str] = []  # Tier-level features
     is_popular: bool = False
     is_available: bool = True
-    usd_price: Optional[float] = Field(
-        None,
-        description="Manual USD price. If not set, will use NGN price with default conversion"
-    )
-    eur_price: Optional[float] = Field(
-        None,
-        description="Manual EUR price. If not set, will use NGN price with default conversion"
-    )
-    gbp_price: Optional[float] = Field(
-        None,
-        description="Manual GBP price. If not set, will use NGN price with default conversion"
-    )
+    usd_price: Optional[float] = Field(None, ge=0)
+    eur_price: Optional[float] = Field(None, ge=0)
+    gbp_price: Optional[float] = Field(None, ge=0)
 
 
 class ServiceTierCreate(ServiceTierBase):
@@ -369,15 +360,16 @@ class ServiceTierUpdate(BaseModel):
     features: Optional[List[str]] = None
     is_popular: Optional[bool] = None
     is_available: Optional[bool] = None
-    usd_price: Optional[float] = None
-    eur_price: Optional[float] = None
-    gbp_price: Optional[float] = None
+    usd_price: Optional[float] = Field(None, ge=0)
+    eur_price: Optional[float] = Field(None, ge=0)
+    gbp_price: Optional[float] = Field(None, ge=0)
 
 
 class ServiceTierInDB(ServiceTierBase):
     id: Optional[PyObjectId] = Field(alias="_id", default=None)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+
 
     class Config:
         allow_population_by_field_name = True
@@ -391,6 +383,9 @@ class ServiceTier(ServiceTierBase):
     updated_at: datetime
     services: List['Service'] = []  # Services within this tier
     category: Optional[ServiceCategory] = None
+    usd_price: Optional[float] = None
+    eur_price: Optional[float] = None
+    gbp_price: Optional[float] = None
 
     class Config:
         orm_mode = True
@@ -3960,6 +3955,9 @@ async def get_service_tiers(
                 name=tier["name"],
                 description=tier["description"],
                 price=tier["price"],
+                usd_price=tier.get("usd_price"),
+                eur_price=tier.get("eur_price"),
+                gbp_price=tier.get("gbp_price"),
                 category_id=tier["category_id"],
                 image=tier.get("image"),
                 features=tier.get("features", []),
@@ -4031,6 +4029,9 @@ async def get_service_tier(tier_id: str):
             name=tier["name"],
             description=tier["description"],
             price=tier["price"],
+            usd_price=tier.get("usd_price"),
+            eur_price=tier.get("eur_price"),
+            gbp_price=tier.get("gbp_price"),
             category_id=tier["category_id"],
             image=tier.get("image"),
             features=tier.get("features", []),
@@ -4121,40 +4122,16 @@ async def update_service_tier(
             )
 
         update_data = tier_update.dict(exclude_unset=True)
+
+        # Handle currency fields explicitly
+        currency_fields = ['usd_price', 'eur_price', 'gbp_price']
+        for field in currency_fields:
+            if field in update_data and update_data[field] is not None:
+                update_data[field] = float(update_data[field])
+            elif field in update_data and update_data[field] is None:
+                update_data[f"${unset}"] = {field: ""}  # To remove the field if None is explicitly passed
+
         if update_data:
-            # Validate required fields if provided
-            if "name" in update_data and not update_data["name"].strip():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Tier name cannot be empty"
-                )
-
-            if "description" in update_data and not update_data["description"].strip():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Tier description cannot be empty"
-                )
-
-            if "price" in update_data and update_data["price"] < 0:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Price cannot be negative"
-                )
-
-            # Validate category if being updated
-            if "category_id" in update_data:
-                category = db.service_categories.find_one({"_id": ObjectId(update_data["category_id"])})
-                if not category:
-                    raise HTTPException(
-                        status_code=status.HTTP_404_NOT_FOUND,
-                        detail="Service category not found"
-                    )
-                if category["category_type"] != ServiceCategoryType.TIERED:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="Can only assign tiers to tiered categories"
-                    )
-
             update_data["updated_at"] = datetime.utcnow()
             result = db.service_tiers.update_one(
                 {"_id": ObjectId(tier_id)},
@@ -4167,6 +4144,7 @@ async def update_service_tier(
                     detail="Tier update failed"
                 )
 
+        # Get updated tier with all relationships
         updated_tier = db.service_tiers.find_one({"_id": ObjectId(tier_id)})
 
         # Get services for this tier
@@ -4219,6 +4197,9 @@ async def update_service_tier(
             features=updated_tier.get("features", []),
             is_popular=updated_tier.get("is_popular", False),
             is_available=updated_tier.get("is_available", True),
+            usd_price=updated_tier.get("usd_price"),
+            eur_price=updated_tier.get("eur_price"),
+            gbp_price=updated_tier.get("gbp_price"),
             created_at=updated_tier["created_at"],
             updated_at=updated_tier["updated_at"],
             services=service_objects,
@@ -4233,6 +4214,7 @@ async def update_service_tier(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to update service tier"
         )
+
 
 
 @app.delete("/service-tiers/{tier_id}")
